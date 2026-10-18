@@ -1,8 +1,12 @@
+%%writefile app.py
 import streamlit as st
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import io
+from dataclasses import replace
+from option_mc_hedging_v12 import HedgeConfig, simulate_paths, hedge_on_paths
+from option_mc_trace_v12_1 import hedge_path_trace
 from scipy.stats import norm
 
 
@@ -203,7 +207,7 @@ st.markdown(
     @media (max-width: 900px) {.summary-grid{grid-template-columns:1fr}.risk-reading{grid-template-columns:1fr}}
         #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-
+    
     /* V8.4 — Risk Summary renforcé */
     .risk-hero {background:linear-gradient(110deg,#123b63,#2563eb);color:white;border-radius:18px;padding:1.15rem 1.3rem;margin:.35rem 0 1rem;box-shadow:0 8px 24px rgba(37,99,235,.16);}
     .risk-hero-kicker {font-size:.72rem;font-weight:850;letter-spacing:.12em;text-transform:uppercase;opacity:.78;}
@@ -724,6 +728,11 @@ def format_fr(value, digits=2):
     return raw.replace(",", "§").replace(".", ",").replace("§", " ")
 
 
+def format_fr_signed(value, digits=2):
+    """French number with explicit sign, for changes and sensitivities."""
+    return ("+" if float(value) > 0 else "−" if float(value) < 0 else "") + format_fr(abs(float(value)), digits)
+
+
 def pnl_breakdown(initial, exact_pnl, delta_spot, vol_shift_pp, elapsed_years):
     """Taylor local; Vega est par point de pourcentage, Theta par an."""
     components = {
@@ -1163,6 +1172,136 @@ if st.session_state.get("_orm_scenario_schema") != "10.0":
     st.session_state["_orm_scenario_schema"] = "10.0"
 
 
+
+# ============================================================
+# V11 — PROFILS DE PAYOFF ET ECHELLES DE RISQUE
+# ============================================================
+
+def expiry_payoff(spot, strike, option_type, side, quantity):
+    """Flux terminal signé, hors prime et hors financement."""
+    intrinsic = max(spot - strike, 0.0) if option_type.lower() == "call" else max(strike - spot, 0.0)
+    return intrinsic * quantity * (1 if side.lower() == "long" else -1)
+
+
+def find_zero_crossings(spots, values):
+    """Interpolation linéaire des points morts dans la plage affichée."""
+    roots = []
+    for i in range(len(spots) - 1):
+        a, b = float(values[i]), float(values[i + 1])
+        if abs(a) < 1e-10:
+            roots.append(float(spots[i]))
+        elif a * b < 0:
+            roots.append(float(spots[i] - a * (spots[i + 1] - spots[i]) / (b - a)))
+    if abs(float(values[-1])) < 1e-10:
+        roots.append(float(spots[-1]))
+    return [v for i, v in enumerate(roots) if not any(abs(v - u) < 1e-5 for u in roots[:i])]
+
+
+def exact_expiry_breakevens(positions, initial_value, tolerance=1e-9):
+    """Racines exactes du P&L terminal, pour S >= 0 et une échéance commune.
+
+    Le payoff est affine entre deux strikes consécutifs. Les intervalles
+    où le P&L est identiquement nul sont signalés séparément.
+    `initial_value` est la valeur signée initiale du portefeuille.
+    """
+    strikes = sorted({float(p["K"]) for p in positions if float(p["K"]) >= 0.0})
+    boundaries = [0.0] + [k for k in strikes if k > 0.0]
+
+    def pnl(spot):
+        return sum(expiry_payoff(spot, p["K"], p["option_type"],
+                                 p["position_type"], p["quantity"])
+                   for p in positions) - initial_value
+
+    roots, flat = [], []
+    def add_root(x):
+        if x >= 0 and not any(abs(x - y) <= tolerance * max(1, abs(x), abs(y)) for y in roots):
+            roots.append(float(x))
+
+    for left, right in zip(boundaries[:-1], boundaries[1:]):
+        fl, fr = pnl(left), pnl(right)
+        if abs(fl) <= tolerance and abs(fr) <= tolerance:
+            flat.append((left, right))
+        elif abs(fr - fl) > tolerance:
+            root = left - fl * (right - left) / (fr - fl)
+            if left - tolerance <= root <= right + tolerance:
+                add_root(max(0.0, root))
+        if abs(fl) <= tolerance:
+            add_root(left)
+    last = boundaries[-1]
+    f_last, f_next = pnl(last), pnl(last + 1.0)
+    slope = f_next - f_last
+    if abs(f_last) <= tolerance:
+        add_root(last)
+    if abs(slope) <= tolerance:
+        if abs(f_last) <= tolerance:
+            flat.append((last, float("inf")))
+    else:
+        root = last - f_last / slope
+        if root >= last - tolerance:
+            add_root(max(0.0, root))
+    isolated = [x for x in roots if not any(a - tolerance <= x <= b + tolerance for a, b in flat)]
+    return sorted(isolated), flat
+
+
+def format_expiry_breakevens(roots, flat):
+    parts = [format_fr(x, 2) + " €" for x in roots
+             if not any(a - 1e-8 <= x <= b + 1e-8 for a, b in flat)]
+    for a, b in flat:
+        parts.append(("dès " + format_fr(a, 2) + " €" if np.isinf(b)
+                      else "de " + format_fr(a, 2) + " à " + format_fr(b, 2) + " €")
+                     + " (P&L nul sur l'intervalle)")
+    return " · ".join(parts) if parts else "Aucun pour un spot positif ou nul"
+
+
+def render_v11_chart(spots, pnl_today, pnl_expiry, reference_spot, current_spot, strikes, chart_key, expiry_positions=None, initial_value=None):
+    """Profils à paramètres constants, avec points morts distincts et annotés."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=spots, y=pnl_today, mode="lines", name="P&L théorique aujourd'hui",
+                             line=dict(width=3, color="#2563eb")))
+    roots_today = find_zero_crossings(spots, pnl_today)
+    if pnl_expiry is not None:
+        fig.add_trace(go.Scatter(x=spots, y=pnl_expiry, mode="lines", name="P&L à échéance (hors financement)",
+                                 line=dict(width=3, dash="dash", color="#d97706")))
+        roots_expiry, flat_expiry = (exact_expiry_breakevens(expiry_positions, initial_value)
+                                     if expiry_positions is not None else (find_zero_crossings(spots, pnl_expiry), []))
+        if roots_expiry:
+            visible_roots = [x for x in roots_expiry if min(spots) <= x <= max(spots)]
+            if visible_roots:
+                fig.add_trace(go.Scatter(x=visible_roots, y=[0]*len(visible_roots), mode="markers+text",
+                                     name="Point(s) mort(s) à échéance", text=[format_fr(x, 2)+" €" for x in visible_roots],
+                                     textposition="bottom right", marker=dict(size=11, color="#d97706", symbol="diamond")))
+    else:
+        roots_expiry, flat_expiry = [], []
+    if roots_today:
+        fig.add_trace(go.Scatter(x=roots_today, y=[0]*len(roots_today), mode="markers",
+                                 name="Équilibre aujourd'hui", marker=dict(size=9, color="#2563eb", symbol="circle-open")))
+    fig.add_hline(y=0, line_width=1, line_color="#64748b")
+    fig.add_vline(x=reference_spot, line_width=1, line_dash="dot", line_color="#64748b")
+    fig.add_vline(x=current_spot, line_width=1, line_dash="dash", line_color="#0891b2")
+    fig.update_layout(xaxis_title="Spot du sous-jacent (€)", yaxis_title="P&L de la position (€)",
+                      legend=dict(orientation="h", y=-0.30), margin=dict(l=18, r=22, t=26, b=90),
+                      font=dict(size=14), hovermode="x unified", height=470)
+    fig.update_xaxes(tickfont=dict(size=13), title_font=dict(size=15))
+    fig.update_yaxes(tickfont=dict(size=13), title_font=dict(size=15))
+    st.plotly_chart(fig, width="stretch", key=chart_key)
+    if pnl_expiry is not None:
+        st.caption("Point(s) mort(s) à échéance (hors financement) : " +
+                   format_expiry_breakevens(roots_expiry, flat_expiry))
+    st.caption("Équilibre(s) de revalorisation aujourd'hui : " +
+               (" · ".join(format_fr(v, 2) + " €" for v in roots_today) if roots_today else "aucun dans la plage affichée") +
+               ". Cette courbe garde la maturité et la volatilité constantes ; ce n'est pas le P&L à échéance.")
+
+
+def render_v11_ladder(rows, key):
+    df = pd.DataFrame(rows)
+    display = df.copy()
+    for name in ("Spot (€)", "Delta (actions)", "Couverture cible (actions)", "Rééquilibrage (actions)", "P&L option (€)", "P&L avec hedge initial (€)"):
+        display[name] = display[name].map(lambda x: format_fr(x, 2))
+    st.dataframe(display, width="stretch", hide_index=True, height=430)
+    st.download_button("Télécharger le risk ladder (CSV)", data=df.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
+                       file_name="risk_ladder.csv", mime="text/csv", key=key)
+    st.info("Lecture : le rééquilibrage est l’ordre à passer **par rapport à la couverture initiale fixée à S₀**. Ce tableau n’est pas une simulation de couverture dynamique. P&L couvert = P&L options + nombre d’actions de couverture initial × (S − S₀). Volatilité et maturité constantes ; frais et financement exclus.")
+
 # ============================================================
 # EN-TÊTE
 # ============================================================
@@ -1186,7 +1325,8 @@ mode = st.radio(
     "Mode d'analyse",
     [
         "Position individuelle",
-        "Portefeuille multi-options"
+        "Portefeuille multi-options",
+        "Monte-Carlo & couverture dynamique"
     ],
     horizontal=True
 )
@@ -1232,30 +1372,29 @@ if mode == "Position individuelle":
         key="single_position_type"
     )
 
+    for _key, _default in SINGLE_DEFAULTS.items():
+        st.session_state.setdefault(_key, _default)
+
     quantity = st.sidebar.number_input(
         "Quantité d'options",
-        value=100,
         step=1,
         key="single_quantity"
     )
 
     S0 = st.sidebar.number_input(
         "Spot de référence S₀ (€)",
-        value=100.0,
         step=1.0,
         key="single_spot"
     )
 
     K = st.sidebar.number_input(
         "Strike K (€)",
-        value=100.0,
         step=1.0,
         key="single_strike"
     )
 
     T = st.sidebar.number_input(
         "Maturité T (années)",
-        value=0.50,
         step=0.05,
         format="%.2f",
         key="single_maturity"
@@ -1263,14 +1402,12 @@ if mode == "Position individuelle":
 
     r_percent = st.sidebar.number_input(
         "Taux sans risque r (%)",
-        value=3.0,
         step=0.1,
         key="single_rate"
     )
 
     sigma_percent = st.sidebar.number_input(
         "Volatilité σ (%)",
-        value=20.0,
         step=1.0,
         key="single_sigma"
     )
@@ -1483,8 +1620,8 @@ if mode == "Position individuelle":
     else:
         st.caption("Scénario de référence actif : aucun choc.")
 
-    single_tab_overview, single_tab_hedge, single_tab_pnl, single_tab_stress, single_tab_summary = st.tabs([
-        "Vue d’ensemble", "Couverture & Gamma", "P&L", "Stress tests", "Synthèse"
+    single_tab_overview, single_tab_hedge, single_tab_pnl, single_tab_stress, single_tab_strategy, single_tab_summary = st.tabs([
+        "Vue d’ensemble", "Couverture & Gamma", "P&L", "Stress tests", "Payoff & Risk ladder", "Synthèse"
     ])
 
     with single_tab_overview:
@@ -1497,9 +1634,9 @@ if mode == "Position individuelle":
                 <span class="badge">{position_type_display.upper()}</span>
                 <span class="badge">{option_type_display.upper()}</span>
                 <span class="badge">{quantity} OPTIONS</span>
-                <span class="badge">S₀ {S0:.2f} €</span>
-                <span class="badge">K {K:.2f} €</span>
-                <span class="badge">σ {sigma_percent:.1f} %</span>
+                <span class="badge">S₀ {format_fr(S0, 2)} €</span>
+                <span class="badge">K {format_fr(K, 2)} €</span>
+                <span class="badge">σ {format_fr(sigma_percent, 1)} %</span>
             </div>
             <div class="section-kicker">Position</div>
             <div class="section-title">Vue d'ensemble</div>
@@ -1517,17 +1654,17 @@ if mode == "Position individuelle":
 
         info2.metric(
             "Spot / Strike",
-            f"{S0:.2f} / {K:.2f} €"
+            f"{format_fr(S0, 2)} / {format_fr(K, 2)} €"
         )
 
         info3.metric(
             "Maturité",
-            f"{T:.2f} an"
+            f"{format_fr(T, 2)} an"
         )
 
         info4.metric(
             "Volatilité",
-            f"{sigma_percent:.2f} %"
+            f"{format_fr(sigma_percent, 2)} %"
         )
 
         # Contrôles numériques : cohérence Call/Put + validation des Greeks
@@ -1540,16 +1677,16 @@ if mode == "Position individuelle":
 
         with st.expander("Contrôles numériques du moteur Black-Scholes", expanded=False):
             st.markdown("**1. Contrôle de cohérence Call/Put — parité Call-Put**")
-            st.write(f"C − P = **{parity_left:.10f}** ; S₀ − K e^(-rT) = **{parity_right:.10f}**")
+            st.write(f"C − P = **{format_fr(parity_left, 10)}** ; S₀ − K e^(-rT) = **{format_fr(parity_right, 10)}**")
             st.write(f"Erreur de parité : **{parity_error:.2e}**")
             st.caption("Ce contrôle vérifie la cohérence entre les prix du Call et du Put ; il ne suffit pas, à lui seul, à valider d₁, d₂ ou les Greeks.")
 
             st.markdown("**2. Validation indépendante des Greeks — différences finies centrales**")
             v1, v2 = st.columns(2)
-            v1.metric("Δ analytique", f"{fd_check['delta_analytic']:.8f}")
-            v1.metric("Δ différences finies", f"{fd_check['delta_fd']:.8f}", delta=f"erreur {fd_check['delta_error']:.2e}", delta_color="off")
-            v2.metric("Γ analytique", f"{fd_check['gamma_analytic']:.8f}")
-            v2.metric("Γ différences finies", f"{fd_check['gamma_fd']:.8f}", delta=f"erreur {fd_check['gamma_error']:.2e}", delta_color="off")
+            v1.metric("Δ analytique", f"{format_fr(fd_check['delta_analytic'], 8)}")
+            v1.metric("Δ différences finies", f"{format_fr(fd_check['delta_fd'], 8)}", delta=f"erreur {fd_check['delta_error']:.2e}", delta_color="off")
+            v2.metric("Γ analytique", f"{format_fr(fd_check['gamma_analytic'], 8)}")
+            v2.metric("Γ différences finies", f"{format_fr(fd_check['gamma_fd'], 8)}", delta=f"erreur {fd_check['gamma_error']:.2e}", delta_color="off")
             st.caption(f"Pas de différence finie h = {fd_check['h']:.4g} €.")
             if parity_error < 1e-8 and within_tol(fd_check["delta_error"], fd_check["delta_analytic"]) and within_tol(fd_check["gamma_error"], fd_check["gamma_analytic"]):
                 st.success("✓ Contrôles numériques réussis : cohérence Call/Put et Greeks analytiques validés numériquement.")
@@ -1601,17 +1738,17 @@ if mode == "Position individuelle":
 
         risk1.metric(
             "Vega (+1 pt de vol.)",
-            f"{position_initiale['position_vega']:.4f} €"
+            f"{format_fr(position_initiale['position_vega'], 4)} €"
         )
 
         risk2.metric(
             "Theta / jour",
-            f"{position_initiale['position_theta_daily']:.4f} €"
+            f"{format_fr(position_initiale['position_theta_daily'], 4)} €"
         )
 
         risk3.metric(
             "Rho (+1 pt de taux)",
-            f"{position_initiale['position_rho']:.4f} €"
+            f"{format_fr(position_initiale['position_rho'], 4)} €"
         )
 
 
@@ -1629,15 +1766,15 @@ if mode == "Position individuelle":
         if hedge_initial > 1e-12:
             st.markdown(
                 f"<div class='trade-card buy'><div class='trade-label'>Action trader</div>"
-                f"<div class='trade-value'>ACHETER {hedge_quantity:.2f} actions</div>"
-                f"<div class='trade-note'>Couverture nécessaire pour rendre la position Delta-neutre au spot S₀ = {S0:.2f} €.</div></div>",
+                f"<div class='trade-value'>ACHETER {format_fr(hedge_quantity, 2)} actions</div>"
+                f"<div class='trade-note'>Couverture nécessaire pour rendre la position Delta-neutre au spot S₀ = {format_fr(S0, 2)} €.</div></div>",
                 unsafe_allow_html=True
             )
         elif hedge_initial < -1e-12:
             st.markdown(
                 f"<div class='trade-card sell'><div class='trade-label'>Action trader</div>"
-                f"<div class='trade-value'>VENDRE {hedge_quantity:.2f} actions</div>"
-                f"<div class='trade-note'>Couverture nécessaire pour rendre la position Delta-neutre au spot S₀ = {S0:.2f} €.</div></div>",
+                f"<div class='trade-value'>VENDRE {format_fr(hedge_quantity, 2)} actions</div>"
+                f"<div class='trade-note'>Couverture nécessaire pour rendre la position Delta-neutre au spot S₀ = {format_fr(S0, 2)} €.</div></div>",
                 unsafe_allow_html=True
             )
         else:
@@ -1661,7 +1798,7 @@ if mode == "Position individuelle":
         )
 
         st.markdown(
-            f"<div class='scenario-strip'><div class='scenario-item'>Spot initial<b>{format_fr(S0)} €</b></div><div class='scenario-item'>Spot simulé<b>{S1:.2f} €</b></div><div class='scenario-item'>Variation<b>{spot_change_pct:+.2f} %</b></div></div>",
+            f"<div class='scenario-strip'><div class='scenario-item'>Spot initial<b>{format_fr(S0)} €</b></div><div class='scenario-item'>Spot simulé<b>{format_fr(S1, 2)} €</b></div><div class='scenario-item'>Variation<b>{format_fr_signed(spot_change_pct, 2)} %</b></div></div>",
             unsafe_allow_html=True
         )
 
@@ -1672,22 +1809,22 @@ if mode == "Position individuelle":
         sim1.metric(
             "Spot simulé",
             f"{format_fr(S1)} €",
-            delta=f"{S1 - S0:+.2f} €"
+            delta=f"{format_fr_signed(S1 - S0, 2)} €"
         )
 
         sim2.metric(
             "Delta",
-            f"{position_S1['position_delta']:.4f}",
+            f"{format_fr(position_S1['position_delta'], 4)}",
             delta=(
-                f"{position_S1['position_delta'] - position_initiale['position_delta']:+.4f}"
+                f"{format_fr_signed(position_S1['position_delta'] - position_initiale['position_delta'], 4)}"
             )
         )
 
         sim3.metric(
             "Gamma",
-            f"{position_S1['position_gamma']:.4f}",
+            f"{format_fr(position_S1['position_gamma'], 4)}",
             delta=(
-                f"{position_S1['position_gamma'] - position_initiale['position_gamma']:+.4f}"
+                f"{format_fr_signed(position_S1['position_gamma'] - position_initiale['position_gamma'], 4)}"
             )
         )
 
@@ -1749,7 +1886,7 @@ if mode == "Position individuelle":
                           f"À S₁ = {format_fr(S1, 2)} €, le Delta de la position vaut {format_fr(position_S1['position_delta'], 4)}. La couverture neutralise localement ce Delta.",
                           f"Il faut {action} {format_fr(abs(hedge_new), 2)} action(s). Lorsque le spot ou les paramètres changent, cette quantité doit être recalculée.")
         st.subheader("Gamma en fonction du spot")
-        moneyness_context(option_type, K, S1)
+
         st.plotly_chart(interactive_risk_chart(single_scenario_curve, "Gamma", S0, S1,
                         position_S1["position_gamma"], K, reference_data=graph_df, option_type=option_type), width="stretch", key="single_gamma_plotly")
         if True:
@@ -1770,7 +1907,7 @@ if mode == "Position individuelle":
         fig_greek = go.Figure(go.Scatter(x=greek_spots, y=[z[gkey] for z in greek_rows], mode="lines", name=greek_choice, line=dict(color="#2563eb", width=3)))
         fig_greek.add_vline(x=S1, line_dash="dash", line_color="#d97706")
         add_moneyness_zones(fig_greek, K, option_type, float(greek_spots[0]), float(greek_spots[-1]))
-        moneyness_context(option_type, K, S1)
+
         fig_greek.update_layout(template="plotly_white", height=380, xaxis_title="Spot (€)", yaxis_title=f"{greek_choice} ({gunit})", margin=dict(l=25,r=20,t=85,b=45))
         st.plotly_chart(fig_greek, width="stretch", key="single_greek_plot_v931")
         st.caption("Zones de moneyness : OTM (bleu), ITM (vert), ATM au strike K (trait violet). Pour un Put, les zones sont inversées par rapport à un Call.")
@@ -1788,8 +1925,8 @@ if mode == "Position individuelle":
 
         st.info(
             f"Maximum de |Gamma| sur la plage étudiée : "
-            f"S = {spot_gamma_max:.2f} € ; "
-            f"Gamma = {gamma_max:.4f}."
+            f"S = {format_fr(spot_gamma_max, 2)} € ; "
+            f"Gamma = {format_fr(gamma_max, 4)}."
         )
 
 
@@ -1881,17 +2018,17 @@ if mode == "Position individuelle":
 
         pnl1.metric(
             "P&L option",
-            f"{option_pnl:.2f} €"
+            f"{format_fr(option_pnl, 2)} €"
         )
 
         pnl2.metric(
             "P&L couverture actions",
-            f"{stock_pnl:.2f} €"
+            f"{format_fr(stock_pnl, 2)} €"
         )
 
         pnl3.metric(
             "P&L position couverte",
-            f"{hedged_pnl:.2f} €"
+            f"{format_fr(hedged_pnl, 2)} €"
         )
 
         approx1, approx2, approx3 = (
@@ -1900,17 +2037,17 @@ if mode == "Position individuelle":
 
         approx1.metric(
             "P&L exact",
-            f"{option_pnl:.2f} €"
+            f"{format_fr(option_pnl, 2)} €"
         )
 
         approx2.metric(
             "Approximation Delta",
-            f"{pnl_delta:.2f} €"
+            f"{format_fr(pnl_delta, 2)} €"
         )
 
         approx3.metric(
             "Approximation Delta-Gamma",
-            f"{pnl_delta_gamma:.2f} €"
+            f"{format_fr(pnl_delta_gamma, 2)} €"
         )
 
         st.markdown("#### Comparaison des méthodes de P&L")
@@ -2127,15 +2264,34 @@ if mode == "Position individuelle":
             <div class='risk-hero'>
                 <div class='risk-hero-kicker'>Risk Summary · Position individuelle</div>
                 <div class='risk-hero-title'>{position_type_display.upper()} {option_type_display.upper()} × {quantity}</div>
-                <div class='risk-hero-sub'>Synthèse de l’exposition et décision de couverture · S₀ {S0:.2f} € · K {K:.2f} € · σ {sigma_percent:.2f} %</div>
+                <div class='risk-hero-sub'>Synthèse de l’exposition et décision de couverture · S₀ {format_fr(S0, 2)} € · K {format_fr(K, 2)} € · σ {format_fr(sigma_percent, 2)} %</div>
             </div>
             <div class='summary-shell'>
                 <div class='summary-grid'>
-                    <div class='summary-kpi'><div class='summary-kpi-label'>Δ Delta</div><div class='summary-kpi-value'>{delta_value:+.4f}</div><div class='summary-kpi-note'>{delta_text}</div></div>
-                    <div class='summary-kpi'><div class='summary-kpi-label'>Γ Gamma</div><div class='summary-kpi-value'>{gamma_value:+.4f}</div><div class='summary-kpi-note'>{gamma_text}</div></div>
-                    <div class='summary-kpi'><div class='summary-kpi-label'>ν Vega</div><div class='summary-kpi-value'>{vega_value:+.4f} €</div><div class='summary-kpi-note'>{vega_text}</div></div>
+                    <div class='summary-kpi'><div class='summary-kpi-label'>Δ Delta</div><div class='summary-kpi-value'>{format_fr_signed(delta_value, 4)}</div><div class='summary-kpi-note'>{delta_text}</div></div>
+                    <div class='summary-kpi'><div class='summary-kpi-label'>Γ Gamma</div><div class='summary-kpi-value'>{format_fr_signed(gamma_value, 4)}</div><div class='summary-kpi-note'>{gamma_text}</div></div>
+                    <div class='summary-kpi'><div class='summary-kpi-label'>ν Vega</div><div class='summary-kpi-value'>{format_fr_signed(vega_value, 4)} €</div><div class='summary-kpi-note'>{vega_text}</div></div>
                 </div>
             </div>""", unsafe_allow_html=True)
+
+        # V11.1 — Résumé du profil de payoff, sans recopier le graphique.
+        premium_total = abs(position_initiale["position_value"])
+        is_long = position_type.lower() == "long"
+        is_call = option_type.lower() == "call"
+        if is_call:
+            breakeven = K + premium_total / quantity * (1 if is_long else 1)
+            loss_profile = f"{format_fr(premium_total, 2)} € (prime payée)" if is_long else "Théoriquement illimitée"
+            gain_profile = "Théoriquement illimité" if is_long else f"{format_fr(premium_total, 2)} € (prime reçue)"
+        else:
+            breakeven = K - premium_total / quantity
+            loss_profile = f"{format_fr(premium_total, 2)} € (prime payée)" if is_long else f"{format_fr(max(0.0, K * quantity - premium_total), 2)} € (si spot nul)"
+            gain_profile = f"{format_fr(max(0.0, K * quantity - premium_total), 2)} € (si spot nul)" if is_long else f"{format_fr(premium_total, 2)} € (prime reçue)"
+        st.markdown("#### Profil de payoff à échéance")
+        pcol1, pcol2, pcol3 = st.columns(3)
+        pcol1.metric("Point mort (hors financement)", f"{format_fr(breakeven, 2)} €" if breakeven >= 0 else "Non atteignable")
+        pcol2.metric("Perte maximale", loss_profile)
+        pcol3.metric("Gain maximal", gain_profile)
+        st.caption("Valeurs à échéance, sans frais ni financement de la prime. Couverture cible initiale : " + trade_instruction(hedge_initial) + ". Détail des sensibilités dans « Payoff & Risk ladder ».")
 
         hedge_class = "buy" if hedge_initial > 1e-12 else ("sell" if hedge_initial < -1e-12 else "neutral")
         hedge_word = hedge_action(hedge_initial)
@@ -2146,24 +2302,24 @@ if mode == "Position individuelle":
                 <div>
                     <div class='hedge-decision-label'>Couverture Delta · ordre théorique</div>
                     <div class='hedge-decision-action'>{hedge_word}</div>
-                    <div class='hedge-decision-qty'>{abs(hedge_initial):.2f} <span>ACTIONS</span></div>
+                    <div class='hedge-decision-qty'>{format_fr(abs(hedge_initial), 2)} <span>ACTIONS</span></div>
                 </div>
                 <div class='hedge-breakdown'>
-                    Delta position <b>{delta_value:+.4f}</b><br>
-                    Delta couverture <b>{hedge_initial:+.4f}</b><br>
-                    Delta après hedge <b>{delta_after_hedge:+.4f}</b> {neutral_status}
+                    Delta position <b>{format_fr_signed(delta_value, 4)}</b><br>
+                    Delta couverture <b>{format_fr_signed(hedge_initial, 4)}</b><br>
+                    Delta après hedge <b>{format_fr_signed(delta_after_hedge, 4)}</b> {neutral_status}
                 </div>
             </div>
             <div class='risk-secondary-title'>Risques secondaires</div>
             <div class='risk-reading'>
-                <div class='risk-reading-item'><strong>Θ Theta / jour</strong><b>{theta_value:+.4f} €</b><br>Effet temporel quotidien, à paramètres de marché constants.</div>
-                <div class='risk-reading-item'><strong>ρ Rho</strong><b>{rho_value:+.4f} €</b><br>Impact estimé pour une hausse de 1 point du taux sans risque.</div>
+                <div class='risk-reading-item'><strong>Θ Theta / jour</strong><b>{format_fr_signed(theta_value, 4)} €</b><br>Effet temporel quotidien, à paramètres de marché constants.</div>
+                <div class='risk-reading-item'><strong>ρ Rho</strong><b>{format_fr_signed(rho_value, 4)} €</b><br>Impact estimé pour une hausse de 1 point du taux sans risque.</div>
                 <div class='risk-reading-item'><strong>Γ Lecture Gamma</strong><b>{gamma_text}</b><br>Le Delta évolue lorsque le spot se déplace.</div>
-                <div class='risk-reading-item'><strong>ν Lecture Vega</strong><b>{vega_text}</b><br>{vega_value:+.4f} € pour +1 point de volatilité.</div>
+                <div class='risk-reading-item'><strong>ν Lecture Vega</strong><b>{vega_text}</b><br>{format_fr_signed(vega_value, 4)} € pour +1 point de volatilité.</div>
             </div>
             <div class='risk-conclusion'>
                 <strong>Lecture de la position</strong>
-                Position {position_type_display} {option_type_display} × {quantity}. {delta_text}. {gamma_text} et {vega_text.lower()}. Une couverture Delta-neutre nécessite de <b>{hedge_word.lower()} {abs(hedge_initial):.2f} actions</b>. Après cette couverture, l’exposition directionnelle instantanée est neutralisée, mais les risques Gamma, Vega et Theta subsistent.
+                Position {position_type_display} {option_type_display} × {quantity}. {delta_text}. {gamma_text} et {vega_text.lower()}. Une couverture Delta-neutre nécessite de <b>{hedge_word.lower()} {format_fr(abs(hedge_initial), 2)} actions</b>. Après cette couverture, l’exposition directionnelle instantanée est neutralisée, mais les risques Gamma, Vega et Theta subsistent.
             </div>""", unsafe_allow_html=True)
 
 
@@ -2183,11 +2339,34 @@ if mode == "Position individuelle":
         )
 
 
+    with single_tab_strategy:
+        st.markdown("### Profil de payoff et échelle de risque")
+        st.caption("P&L aujourd'hui : revalorisation à maturité constante, moins valeur initiale. À l'échéance : payoff moins prime initiale ; financement ignoré.")
+        v11_spots = np.linspace(max(0.01, 0.50 * S0), 1.50 * S0, 401)
+        v11_today = np.array([option_position(float(spot), K, T, r, sigma, option_type, position_type, quantity)["position_value"] - position_initiale["position_value"] for spot in v11_spots])
+        v11_expiry = np.array([expiry_payoff(float(spot), K, option_type, position_type, quantity) - position_initiale["position_value"] for spot in v11_spots])
+        render_v11_chart(v11_spots, v11_today, v11_expiry, S0, S1, [K], "v11_single_payoff",
+                         expiry_positions=[{"K": K, "option_type": option_type, "position_type": position_type, "quantity": quantity}],
+                         initial_value=position_initiale["position_value"])
+        st.markdown("#### Risk ladder — de −10 % à +10 % du spot initial")
+        v11_rows = []
+        for shock in np.linspace(-0.10, 0.10, 11):
+            spot = S0 * (1 + shock)
+            state = option_position(spot, K, T, r, sigma, option_type, position_type, quantity)
+            pnl = state["position_value"] - position_initiale["position_value"]
+            v11_rows.append({"Choc spot": f"{shock:+.0%}", "Spot (€)": spot,
+                             "Delta (actions)": state["position_delta"],
+                             "Couverture cible (actions)": state["hedge_shares"],
+                             "Rééquilibrage (actions)": state["hedge_shares"] - hedge_initial,
+                             "P&L option (€)": pnl,
+                             "P&L avec hedge initial (€)": pnl + hedge_initial * (spot - S0)})
+        render_v11_ladder(v11_rows, "v11_single_ladder_csv")
+
 # ============================================================
 # MODE 2 — PORTEFEUILLE MULTI-OPTIONS
 # ============================================================
 
-else:
+elif mode == "Portefeuille multi-options":
 
     st.header(
         "Portefeuille multi-options"
@@ -2211,16 +2390,17 @@ else:
     st.session_state.setdefault("portfolio_count", 2)
     st.session_state.setdefault("v91_portfolio_vol_shift", 0.0)
     st.session_state.setdefault("v91_portfolio_elapsed", 0.0)
+    for _key, _default in PORTFOLIO_DEFAULTS.items():
+        st.session_state.setdefault(_key, _default)
+
     portfolio_S0 = st.sidebar.number_input(
         "Spot commun S₀ (€)",
-        value=100.0,
         step=1.0,
         key="portfolio_spot"
     )
 
     portfolio_r_percent = st.sidebar.number_input(
         "Taux sans risque commun r (%)",
-        value=3.0,
         step=0.1,
         key="portfolio_rate"
     )
@@ -2344,8 +2524,8 @@ else:
     else:
         st.caption("Scénario de référence actif : aucun choc.")
 
-    portfolio_tab_overview, portfolio_tab_hedge, portfolio_tab_pnl, portfolio_tab_stress, portfolio_tab_summary = st.tabs([
-        "Vue d’ensemble", "Couverture & Gamma", "P&L", "Stress tests", "Synthèse"
+    portfolio_tab_overview, portfolio_tab_hedge, portfolio_tab_pnl, portfolio_tab_stress, portfolio_tab_strategy, portfolio_tab_summary = st.tabs([
+        "Vue d’ensemble", "Couverture & Gamma", "P&L", "Stress tests", "Payoff & Risk ladder", "Synthèse"
     ])
 
     with portfolio_tab_overview:
@@ -2368,6 +2548,10 @@ else:
                 expanded=False
             ):
 
+                for _field, _default in (("qty", 100), ("K", 100.0 + 5.0 * i),
+                                         ("T", 0.50), ("sigma", 20.0)):
+                    st.session_state.setdefault(f"portfolio_{_field}_{i}", _default)
+
                 c1, c2, c3 = st.columns(3)
 
                 with c1:
@@ -2388,17 +2572,12 @@ else:
 
                     qty = st.number_input(
                         "Quantité",
-                        value=100,
                         step=1,
                         key=f"portfolio_qty_{i}"
                     )
 
                     strike = st.number_input(
                         "Strike K (€)",
-                        value=(
-                            100.0
-                            + 5.0 * i
-                        ),
                         step=1.0,
                         key=f"portfolio_K_{i}"
                     )
@@ -2407,7 +2586,6 @@ else:
 
                     maturity = st.number_input(
                         "Maturité T (années)",
-                        value=0.50,
                         step=0.05,
                         format="%.2f",
                         key=f"portfolio_T_{i}"
@@ -2415,7 +2593,6 @@ else:
 
                     vol_percent = st.number_input(
                         "Volatilité σ (%)",
-                        value=20.0,
                         step=1.0,
                         key=f"portfolio_sigma_{i}"
                     )
@@ -2646,14 +2823,14 @@ else:
         if portfolio_hedge > 1e-12:
             st.markdown(
                 f"<div class='trade-card buy'><div class='trade-label'>Couverture Delta globale</div>"
-                f"<div class='trade-value'>ACHETER {abs(portfolio_hedge):.2f} ACTIONS</div>"
+                f"<div class='trade-value'>ACHETER {format_fr(abs(portfolio_hedge), 2)} ACTIONS</div>"
                 f"<div class='trade-note'>Position de couverture nécessaire pour neutraliser le Delta agrégé du portefeuille.</div></div>",
                 unsafe_allow_html=True
             )
         elif portfolio_hedge < -1e-12:
             st.markdown(
                 f"<div class='trade-card sell'><div class='trade-label'>Couverture Delta globale</div>"
-                f"<div class='trade-value'>VENDRE {abs(portfolio_hedge):.2f} ACTIONS</div>"
+                f"<div class='trade-value'>VENDRE {format_fr(abs(portfolio_hedge), 2)} ACTIONS</div>"
                 f"<div class='trade-note'>Position de couverture nécessaire pour neutraliser le Delta agrégé du portefeuille.</div></div>",
                 unsafe_allow_html=True
             )
@@ -2666,9 +2843,9 @@ else:
             )
 
         p4, p5, p6 = st.columns(3)
-        p4.metric("ν  Vega (+1 pt de vol.)", f"{total_vega:.4f} €")
-        p5.metric("Θ  Theta / jour", f"{total_theta:.4f} €")
-        p6.metric("ρ  Rho (+1 pt de taux)", f"{total_rho:.4f} €")
+        p4.metric("ν  Vega (+1 pt de vol.)", f"{format_fr(total_vega, 4)} €")
+        p5.metric("Θ  Theta / jour", f"{format_fr(total_theta, 4)} €")
+        p6.metric("ρ  Rho (+1 pt de taux)", f"{format_fr(total_rho, 4)} €")
 
 
         # --------------------------------------------------------
@@ -2729,7 +2906,7 @@ else:
                 colors = ["#16a34a" if v >= 0 else "#dc2626" for v in values]
                 fig_contrib = go.Figure(go.Bar(
                     x=values, y=labels, orientation="h", marker_color=colors,
-                    text=[f"{v:+.2f}" for v in values], textposition="auto",
+                    text=[f"{format_fr_signed(v, 2)}" for v in values], textposition="auto",
                     hovertemplate="%{y} : %{x:.4f}<extra></extra>"))
                 fig_contrib.add_vline(x=0, line_color="#64748b", line_width=1)
                 fig_contrib.update_layout(template="plotly_white", height=300,
@@ -2827,23 +3004,23 @@ else:
             "Spot simulé",
             f"{format_fr(portfolio_S1)} €",
             delta=(
-                f"{portfolio_S1 - portfolio_S0:+.2f} €"
+                f"{format_fr_signed(portfolio_S1 - portfolio_S0, 2)} €"
             )
         )
 
         ps2.metric(
             "Delta portefeuille",
-            f"{simulated_delta:.4f}",
+            f"{format_fr(simulated_delta, 4)}",
             delta=(
-                f"{simulated_delta - total_delta:+.4f}"
+                f"{format_fr_signed(simulated_delta - total_delta, 4)}"
             )
         )
 
         ps3.metric(
             "Gamma portefeuille",
-            f"{simulated_gamma:.4f}",
+            f"{format_fr(simulated_gamma, 4)}",
             delta=(
-                f"{simulated_gamma - total_gamma:+.4f}"
+                f"{format_fr_signed(simulated_gamma - total_gamma, 4)}"
             )
         )
 
@@ -3035,17 +3212,17 @@ else:
 
         pp1.metric(
             "P&L options",
-            f"{portfolio_option_pnl:.2f} €"
+            f"{format_fr(portfolio_option_pnl, 2)} €"
         )
 
         pp2.metric(
             "P&L couverture actions",
-            f"{portfolio_stock_pnl:.2f} €"
+            f"{format_fr(portfolio_stock_pnl, 2)} €"
         )
 
         pp3.metric(
             "P&L portefeuille couvert",
-            f"{portfolio_hedged_pnl:.2f} €"
+            f"{format_fr(portfolio_hedged_pnl, 2)} €"
         )
 
         pa1, pa2, pa3 = (
@@ -3054,17 +3231,17 @@ else:
 
         pa1.metric(
             "P&L exact",
-            f"{portfolio_option_pnl:.2f} €"
+            f"{format_fr(portfolio_option_pnl, 2)} €"
         )
 
         pa2.metric(
             "Approximation Delta",
-            f"{portfolio_delta_approx:.2f} €"
+            f"{format_fr(portfolio_delta_approx, 2)} €"
         )
 
         pa3.metric(
             "Approximation Delta-Gamma",
-            f"{portfolio_delta_gamma_approx:.2f} €"
+            f"{format_fr(portfolio_delta_gamma_approx, 2)} €"
         )
 
         st.markdown("#### Comparaison des méthodes de P&L")
@@ -3259,15 +3436,28 @@ else:
             <div class='risk-hero'>
                 <div class='risk-hero-kicker'>Risk Summary · Portefeuille</div>
                 <div class='risk-hero-title'>{number_positions} POSITIONS · RISQUE AGRÉGÉ</div>
-                <div class='risk-hero-sub'>Synthèse de l’exposition et décision de couverture · S₀ {portfolio_S0:.2f} € · Valeur {total_value:.2f} € · r {portfolio_r_percent:.2f} %</div>
+                <div class='risk-hero-sub'>Synthèse de l’exposition et décision de couverture · S₀ {format_fr(portfolio_S0, 2)} € · Valeur {format_fr(total_value, 2)} € · r {format_fr(portfolio_r_percent, 2)} %</div>
             </div>
             <div class='summary-shell'>
                 <div class='summary-grid'>
-                    <div class='summary-kpi'><div class='summary-kpi-label'>Δ Delta agrégé</div><div class='summary-kpi-value'>{total_delta:+.4f}</div><div class='summary-kpi-note'>{portfolio_delta_text}</div></div>
-                    <div class='summary-kpi'><div class='summary-kpi-label'>Γ Gamma agrégé</div><div class='summary-kpi-value'>{total_gamma:+.4f}</div><div class='summary-kpi-note'>{portfolio_gamma_text}</div></div>
-                    <div class='summary-kpi'><div class='summary-kpi-label'>ν Vega agrégé</div><div class='summary-kpi-value'>{total_vega:+.4f} €</div><div class='summary-kpi-note'>{portfolio_vega_text}</div></div>
+                    <div class='summary-kpi'><div class='summary-kpi-label'>Δ Delta agrégé</div><div class='summary-kpi-value'>{format_fr_signed(total_delta, 4)}</div><div class='summary-kpi-note'>{portfolio_delta_text}</div></div>
+                    <div class='summary-kpi'><div class='summary-kpi-label'>Γ Gamma agrégé</div><div class='summary-kpi-value'>{format_fr_signed(total_gamma, 4)}</div><div class='summary-kpi-note'>{portfolio_gamma_text}</div></div>
+                    <div class='summary-kpi'><div class='summary-kpi-label'>ν Vega agrégé</div><div class='summary-kpi-value'>{format_fr_signed(total_vega, 4)} €</div><div class='summary-kpi-note'>{portfolio_vega_text}</div></div>
                 </div>
             </div>""", unsafe_allow_html=True)
+
+        # V11.1 — Synthèse du profil du portefeuille : aucun plafond inventé.
+        st.markdown("#### Profil de payoff du portefeuille")
+        same_expiry_summary = all(abs(o["T"] - portfolio_inputs[0]["T"]) < 1e-9 for o in portfolio_inputs)
+        if same_expiry_summary:
+            roots_summary, flat_summary = exact_expiry_breakevens(portfolio_inputs, total_value)
+            root_label = format_expiry_breakevens(roots_summary, flat_summary)
+            st.markdown("**Point(s) mort(s) à échéance — domaine complet S ≥ 0**")
+            st.write(root_label)
+            st.caption("Pertes et gains extrêmes dépendent de la composition des positions ; ne pas déduire une perte maximale de la seule plage du graphique.")
+        else:
+            st.info("Échéances différentes : aucun point mort terminal unique n'est défini pour le portefeuille.")
+        st.caption("Couverture initiale cible : " + trade_instruction(portfolio_hedge) + ". Voir « Payoff & Risk ladder » pour les scénarios de spot.")
 
         portfolio_hedge_class = "buy" if portfolio_hedge > 1e-12 else ("sell" if portfolio_hedge < -1e-12 else "neutral")
         portfolio_delta_after = clean_zero(total_delta + portfolio_hedge)
@@ -3277,24 +3467,24 @@ else:
                 <div>
                     <div class='hedge-decision-label'>Couverture Delta globale · ordre théorique</div>
                     <div class='hedge-decision-action'>{action}</div>
-                    <div class='hedge-decision-qty'>{abs(portfolio_hedge):.2f} <span>ACTIONS</span></div>
+                    <div class='hedge-decision-qty'>{format_fr(abs(portfolio_hedge), 2)} <span>ACTIONS</span></div>
                 </div>
                 <div class='hedge-breakdown'>
-                    Delta portefeuille <b>{total_delta:+.4f}</b><br>
-                    Delta couverture <b>{portfolio_hedge:+.4f}</b><br>
-                    Delta après hedge <b>{portfolio_delta_after:+.4f}</b> {portfolio_neutral_status}
+                    Delta portefeuille <b>{format_fr_signed(total_delta, 4)}</b><br>
+                    Delta couverture <b>{format_fr_signed(portfolio_hedge, 4)}</b><br>
+                    Delta après hedge <b>{format_fr_signed(portfolio_delta_after, 4)}</b> {portfolio_neutral_status}
                 </div>
             </div>
             <div class='risk-secondary-title'>Risques secondaires</div>
             <div class='risk-reading'>
-                <div class='risk-reading-item'><strong>Θ Theta / jour</strong><b>{total_theta:+.4f} €</b><br>Effet temporel quotidien agrégé.</div>
-                <div class='risk-reading-item'><strong>ρ Rho agrégé</strong><b>{total_rho:+.4f} €</b><br>Impact pour une hausse de 1 point du taux sans risque.</div>
+                <div class='risk-reading-item'><strong>Θ Theta / jour</strong><b>{format_fr_signed(total_theta, 4)} €</b><br>Effet temporel quotidien agrégé.</div>
+                <div class='risk-reading-item'><strong>ρ Rho agrégé</strong><b>{format_fr_signed(total_rho, 4)} €</b><br>Impact pour une hausse de 1 point du taux sans risque.</div>
                 <div class='risk-reading-item'><strong>Γ Lecture Gamma</strong><b>{portfolio_gamma_text}</b><br>La couverture Delta évoluera lorsque le spot se déplace.</div>
-                <div class='risk-reading-item'><strong>ν Lecture Vega</strong><b>{portfolio_vega_text}</b><br>{total_vega:+.4f} € pour +1 point de volatilité.</div>
+                <div class='risk-reading-item'><strong>ν Lecture Vega</strong><b>{portfolio_vega_text}</b><br>{format_fr_signed(total_vega, 4)} € pour +1 point de volatilité.</div>
             </div>
             <div class='risk-conclusion'>
                 <strong>Lecture du portefeuille</strong>
-                Portefeuille de {number_positions} positions. {portfolio_delta_text}. {portfolio_gamma_text} et {portfolio_vega_text.lower()}. Une couverture Delta-neutre nécessite de <b>{action.lower()} {abs(portfolio_hedge):.2f} actions</b>. Après couverture, le Delta instantané est neutralisé tandis que les expositions Gamma, Vega et Theta restent présentes.
+                Portefeuille de {number_positions} positions. {portfolio_delta_text}. {portfolio_gamma_text} et {portfolio_vega_text.lower()}. Une couverture Delta-neutre nécessite de <b>{action.lower()} {format_fr(abs(portfolio_hedge), 2)} actions</b>. Après couverture, le Delta instantané est neutralisé tandis que les expositions Gamma, Vega et Theta restent présentes.
             </div>""", unsafe_allow_html=True)
 
 
@@ -3319,3 +3509,211 @@ else:
         "<div class='footer-note'>Option Risk Manager · Black-Scholes · European Options · Delta Hedging · M2 IREF Finance Quantitative</div>",
         unsafe_allow_html=True
     )
+
+    with portfolio_tab_strategy:
+        st.markdown("### Profil de payoff et échelle de risque du portefeuille")
+        st.caption("La courbe pleine représente le P&L de revalorisation à paramètres initiaux constants. Le pointillé terminal n'est affiché que si toutes les options ont la même échéance.")
+        v11_spots = np.linspace(max(0.01, 0.50 * portfolio_S0), 1.50 * portfolio_S0, 301)
+        v11_today = np.array([
+            sum(option_position(float(spot), o["K"], o["T"], portfolio_r, o["sigma_percent"] / 100,
+                                o["option_type"].lower(), o["position_type"].lower(), o["quantity"])["position_value"]
+                for o in portfolio_inputs) - total_value for spot in v11_spots])
+        same_maturity = all(abs(o["T"] - portfolio_inputs[0]["T"]) < 1e-9 for o in portfolio_inputs)
+        v11_expiry = None
+        if same_maturity:
+            v11_expiry = np.array([
+                sum(expiry_payoff(float(spot), o["K"], o["option_type"], o["position_type"], o["quantity"])
+                    for o in portfolio_inputs) - total_value for spot in v11_spots])
+        else:
+            st.info("Échéances différentes : pas de payoff terminal unique. Seule la courbe de revalorisation est affichée.")
+        render_v11_chart(v11_spots, v11_today, v11_expiry, portfolio_S0, portfolio_S1,
+                         [o["K"] for o in portfolio_inputs], "v11_portfolio_payoff",
+                         expiry_positions=portfolio_inputs if same_maturity else None,
+                         initial_value=total_value if same_maturity else None)
+        st.markdown("#### Risk ladder — de −10 % à +10 % du spot initial")
+        v11_rows = []
+        for shock in np.linspace(-0.10, 0.10, 11):
+            spot = portfolio_S0 * (1 + shock)
+            positions = [option_position(spot, o["K"], o["T"], portfolio_r, o["sigma_percent"] / 100,
+                                         o["option_type"].lower(), o["position_type"].lower(), o["quantity"])
+                         for o in portfolio_inputs]
+            value = sum(x["position_value"] for x in positions)
+            delta = sum(x["position_delta"] for x in positions)
+            hedge = -delta
+            pnl = value - total_value
+            v11_rows.append({"Choc spot": f"{shock:+.0%}", "Spot (€)": spot,
+                             "Delta (actions)": delta,
+                             "Couverture cible (actions)": hedge,
+                             "Rééquilibrage (actions)": hedge - portfolio_hedge,
+                             "P&L option (€)": pnl,
+                             "P&L avec hedge initial (€)": pnl + portfolio_hedge * (spot - portfolio_S0)})
+        render_v11_ladder(v11_rows, "v11_portfolio_ladder_csv")
+
+
+# ============================================================
+# MODE 3 — MONTE-CARLO ET COUVERTURE DELTA DYNAMIQUE
+# ============================================================
+else:
+    st.subheader("Monte-Carlo & couverture Delta dynamique")
+    st.caption("Option européenne **vendue** (Short Call ou Short Put), multiplicateur 1, sans dividendes. "
+               "Couverture en actions fractionnaires, compte de trésorerie rémunéré au taux continu r.")
+    with st.expander("Hypothèses et lecture du P&L", expanded=False):
+        st.markdown("""Le sous-jacent suit un mouvement brownien géométrique. Par défaut, la dérive de simulation est égale au taux sans risque (mesure risque-neutre). Le prix initial de l'option est celui de Black-Scholes. La prime reçue finance l'achat initial d'actions, le solde étant placé ou emprunté au taux sans risque. Les transactions coûtent un pourcentage du notionnel échangé, y compris à l'ouverture et à la liquidation finale. Le P&L final est exprimé en euros **après** règlement du payoff de l'option et liquidation des actions. Il ne s'agit ni d'un rendement ni d'une garantie de résultat. La volatilité implicite de couverture est supposée égale à la volatilité simulée. Les graphiques de revalorisation de l'autre mode ne sont pas des simulations dynamiques.""")
+    a,b,c,d = st.columns(4)
+    with a:
+        mc_spot = st.number_input("Spot initial (€)", min_value=0.01, value=100.0, key="mc_spot")
+        mc_strike = st.number_input("Strike (€)", min_value=0.01, value=100.0, key="mc_strike")
+        mc_type = st.selectbox("Option vendue", ["Call", "Put"], key="mc_type")
+    with b:
+        mc_maturity = st.number_input("Maturité (années)", min_value=0.01, max_value=10.0, value=0.5, step=0.05, key="mc_maturity")
+        mc_rate = st.number_input("Taux sans risque (%)", value=3.0, step=0.25, key="mc_rate")
+        mc_vol = st.number_input("Volatilité (%)", min_value=0.01, max_value=300.0, value=20.0, step=1.0, key="mc_vol")
+    with c:
+        mc_qty = st.number_input("Quantité d'options vendues", min_value=1, max_value=100000, value=100, key="mc_qty")
+        mc_paths = st.number_input("Nombre de trajectoires", min_value=100, max_value=10000, value=1000, step=100, key="mc_paths")
+        mc_steps = st.number_input("Pas de simulation", min_value=3, max_value=504, value=126, key="mc_steps")
+    with d:
+        mc_rebalance = st.selectbox("Rééquilibrage principal", [1, 5, 21], format_func=lambda n: {1:"Chaque pas",5:"Tous les 5 pas",21:"Tous les 21 pas"}[n], key="mc_rebalance")
+        mc_fee = st.number_input("Coût par transaction (points de base)", min_value=0.0, max_value=1000.0, value=0.0, step=1.0, key="mc_fee")
+        mc_seed = st.number_input("Graine aléatoire", min_value=0, max_value=10000000, value=42, key="mc_seed")
+    mc_use_drift = st.checkbox("Personnaliser la dérive de simulation (μ)", value=False, key="mc_use_drift")
+    mc_drift = st.number_input("Dérive μ (%)", value=3.0, step=0.25, key="mc_drift") if mc_use_drift else mc_rate
+    st.caption("Un pas = T / nombre de pas. Les fréquences 1, 5 et 21 désignent des **pas simulés**, "
+               "et non nécessairement des jours de bourse. Pour 0,5 an et 126 pas, un pas correspond environ à un jour de bourse.")
+
+    mc_config = HedgeConfig(spot=float(mc_spot), strike=float(mc_strike), maturity=float(mc_maturity),
+                            rate=float(mc_rate)/100, volatility=float(mc_vol)/100,
+                            option_type=mc_type.lower(), quantity=float(mc_qty),
+                            n_steps=int(mc_steps), n_paths=int(mc_paths),
+                            rebalance_every=int(mc_rebalance), transaction_cost_rate=float(mc_fee)/10000,
+                            drift=float(mc_drift)/100, seed=int(mc_seed))
+    @st.cache_data(show_spinner=False, max_entries=4)
+    def _mc_cached(c):
+        paths = simulate_paths(c)
+        frequencies = sorted(set([1, 5, 21, c.rebalance_every]))
+        results = {f: hedge_on_paths(replace(c, rebalance_every=f), paths) for f in frequencies}
+        return paths, results
+
+    if mc_steps < 21:
+        st.warning("Avec moins de 21 pas, la fréquence '21 pas' ne déclenche aucun rééquilibrage intermédiaire.")
+    if mc_paths * (mc_steps + 1) > 2500000:
+        st.warning("Simulation importante : le calcul peut prendre quelques secondes.")
+    try:
+        with st.spinner("Simulation des trajectoires et des couvertures…"):
+            mc_prices, mc_results = _mc_cached(mc_config)
+        mc_result = mc_results[int(mc_rebalance)]
+        m1,m2,m3,m4,m5 = st.columns(5)
+        m1.metric("P&L moyen", f"{mc_result['mean_pnl']:,.2f} €")
+        m2.metric("Écart-type du P&L", f"{mc_result['std_pnl']:,.2f} €")
+        m3.metric("RMSE (écart à zéro)", f"{mc_result['rmse']:,.2f} €")
+        m4.metric("Quantile 5 %", f"{mc_result['p05']:,.2f} €")
+        m5.metric("Frais moyens", f"{np.mean(mc_result['trading_cost']):,.2f} €")
+        st.caption(f"Prime initiale reçue : {mc_result['premium_received']:,.2f} € · "
+                   f"Actions détenues initialement : {mc_result['initial_shares']:,.4f} · "
+                   "P&L net de frais et financement. Quantile 5 % = seuil sous lequel se trouvent 5 % des résultats simulés.")
+        chart1,chart2=st.columns(2)
+        with chart1:
+            st.markdown("#### Trajectoires du sous-jacent")
+            fig=go.Figure()
+            t=np.linspace(0,mc_maturity,mc_steps+1)
+            for i in range(min(25,mc_paths)):
+                fig.add_trace(go.Scatter(x=t,y=mc_prices[:,i],mode="lines",line=dict(width=1),
+                                         opacity=0.55,showlegend=False))
+            fig.update_layout(xaxis_title="Temps (années)",yaxis_title="Spot (€)",height=390,
+                              margin=dict(l=15,r=15,t=15,b=15))
+            st.plotly_chart(fig, width="stretch")
+        with chart2:
+            st.markdown("#### Distribution du P&L final couvert")
+            fig=go.Figure()
+            fig.add_trace(go.Histogram(x=mc_result['pnl'],nbinsx=45,name="P&L final"))
+            fig.add_vline(x=0,line_dash="dash",line_color="black")
+            fig.update_layout(xaxis_title="P&L final (€)",yaxis_title="Nombre de trajectoires",height=390,
+                              margin=dict(l=15,r=15,t=15,b=15))
+            st.plotly_chart(fig,width="stretch")
+        st.markdown("#### Suivi d’une couverture Delta sur une trajectoire")
+        st.caption("La trajectoire sélectionnée utilise exactement les mêmes prix et paramètres que la simulation. "
+                   "Le Delta est celui d’une option unitaire ; les actions détenues correspondent à la couverture "
+                   "des options **vendues**. Les positions sont montrées après les transactions, et avant "
+                   "la liquidation finale à l’échéance.")
+        mc_path_index = st.number_input("Trajectoire à examiner (numéro)", min_value=1,
+                                        max_value=int(mc_paths), value=1, step=1,
+                                        key="mc_path_trace_index")
+        mc_trace = hedge_path_trace(mc_config, mc_prices, int(mc_path_index) - 1)
+        if not np.isclose(mc_trace["final_pnl"], mc_result["pnl"][int(mc_path_index)-1], atol=1e-7, rtol=1e-10):
+            st.error("Incohérence détectée entre le suivi de la trajectoire et le moteur Monte-Carlo.")
+        else:
+            st.caption(f"Trajectoire n° {mc_path_index} : P&L final = {mc_trace['final_pnl']:,.2f} € · "
+                       f"Frais cumulés = {mc_trace['total_fees']:,.2f} € · "
+                       f"Spot final = {mc_trace['spot'][-1]:,.2f} €")
+        left_trace, right_trace = st.columns(2)
+        with left_trace:
+            st.markdown("##### Évolution du Delta Black-Scholes")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=mc_trace["time"], y=mc_trace["delta"], mode="lines",
+                                     name="Delta théorique unitaire", line=dict(color="#2563eb", width=2)))
+            fig.update_layout(xaxis_title="Temps (années)", yaxis_title="Delta unitaire",
+                              height=340, margin=dict(l=15,r=15,t=15,b=15))
+            st.plotly_chart(fig, width="stretch")
+        with right_trace:
+            st.markdown("##### Actions détenues pour couvrir l’option vendue")
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=mc_trace["time"], y=mc_trace["shares"], mode="lines",
+                                     line_shape="hv", name="Actions en portefeuille",
+                                     line=dict(color="#0d9488", width=2)))
+            fig.update_layout(xaxis_title="Temps (années)", yaxis_title="Nombre d’actions",
+                              height=340, margin=dict(l=15,r=15,t=15,b=15))
+            st.plotly_chart(fig, width="stretch")
+        st.caption("Le Delta théorique évolue continuellement avec le spot et le temps restant ; "
+                   "le nombre d’actions n’est ajusté qu’aux dates de rééquilibrage. "
+                   "À l’échéance, la couverture est liquidée et le payoff de l’option vendue est réglé.")
+
+        st.markdown("#### Comparaison des fréquences de rééquilibrage")
+        mc_rows=[]
+        for f,res in sorted(mc_results.items()):
+            mc_rows.append({"Fréquence (pas)":f,"P&L moyen (€)":res['mean_pnl'],
+                            "Écart-type (€)":res['std_pnl'],"RMSE (€)":res['rmse'],
+                            "Quantile 5 % (€)":res['p05'],"Quantile 95 % (€)":res['p95'],
+                            "Frais moyens (€)":float(np.mean(res['trading_cost']))})
+        mc_df=pd.DataFrame(mc_rows)
+        st.dataframe(mc_df,hide_index=True,width="stretch")
+        fig=go.Figure()
+        # Axe catégoriel : 1, 5 et 21 sont des fréquences distinctes, non une échelle continue.
+        mc_frequencies = sorted(mc_results)
+        mc_labels = [f"Tous les {f} pas" if f > 1 else "Chaque pas" for f in mc_frequencies]
+        fig.add_trace(go.Bar(x=mc_labels,
+                             y=[mc_results[f]['rmse'] for f in mc_frequencies],
+                             name="RMSE du P&L",
+                             text=[f"{mc_results[f]['rmse']:.2f} €" for f in mc_frequencies],
+                             textposition="outside", cliponaxis=False))
+        fig.update_layout(xaxis_title="Fréquence de rééquilibrage",yaxis_title="RMSE (€)",height=360,
+                          xaxis=dict(type="category", categoryorder="array", categoryarray=mc_labels),
+                          margin=dict(l=15,r=15,t=25,b=15))
+        st.plotly_chart(fig,width="stretch")
+        st.markdown("#### Compromis entre précision et coût de couverture")
+        st.caption("Chaque point correspond à une fréquence, sur les mêmes trajectoires. "
+                   "L’axe horizontal représente les frais moyens ; l’axe vertical le RMSE du P&L net.")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=[float(np.mean(res["trading_cost"])) for res in mc_results.values()],
+            y=[res["rmse"] for res in mc_results.values()],
+            text=[f"Tous les {f} pas" for f in mc_results],
+            customdata=[[res["mean_pnl"]] for res in mc_results.values()],
+            mode="markers+text", textposition="top center",
+            marker=dict(size=13, color="#2563eb"),
+            hovertemplate="%{text}<br>Frais moyens : %{x:.2f} €<br>RMSE : %{y:.2f} €<br>P&L moyen : %{customdata[0]:.2f} €<extra></extra>"
+        ))
+        fig.update_layout(xaxis_title="Frais de transaction moyens (€)",
+                          yaxis_title="RMSE du P&L net (€)", height=360,
+                          margin=dict(l=15,r=15,t=25,b=15))
+        st.plotly_chart(fig, width="stretch")
+        if mc_fee == 0:
+            st.caption("Sans frais, tous les points ont un coût nul : le graphique compare surtout le RMSE. "
+                       "Essaie 10 points de base pour visualiser le compromis.")
+
+        st.download_button("Exporter les statistiques CSV",mc_df.to_csv(index=False).encode("utf-8-sig"),
+                           file_name="monte_carlo_couverture_v12.csv",mime="text/csv",key="mc_download")
+        st.info("Comparaison réalisée sur les **mêmes trajectoires** pour toutes les fréquences. "
+                "Une fréquence plus élevée peut réduire l'erreur de couverture en l'absence de frais, "
+                "mais augmenter les coûts lorsque les transactions sont facturées.")
+    except (ValueError, OverflowError, FloatingPointError) as exc:
+        st.error(f"Paramètres de simulation invalides : {exc}")
