@@ -903,22 +903,39 @@ def render_pnl_error_curve(spots, exact_values, delta_values, dg_values, current
                  "il ne reflète pas les chocs simultanés de volatilité ou de temps.")
 
 
-def render_hedge_rebalance(initial_hedge, scenario_hedge, key):
-    """Quantités signées : positif acheter, négatif vendre."""
+def hedge_decomposition_html(initial_hedge, scenario_hedge, compact=False):
+    """Une seule décision principale ; S₀ et ajustement expliquent la cible S₁."""
     change = scenario_hedge - initial_hedge
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Couverture initiale", format_fr(initial_hedge, 2) + " actions")
-    c2.metric("Couverture cible", format_fr(scenario_hedge, 2) + " actions")
-    c3.metric("Ordre de rééquilibrage",
-              ("ACHETER " if change > 1e-9 else "VENDRE " if change < -1e-9 else "AUCUN ")
-              + format_fr(abs(change), 2) + " actions")
+    action = hedge_action(scenario_hedge)
+    css = "buy" if action == "ACHETER" else "sell" if action == "VENDRE" else "neutral"
+    main_style = "font-size:1.3rem;" if compact else ""
+    return (
+        f"<div class='trade-card {css}' style='margin:.45rem 0 1rem;'>"
+        f"<div class='trade-label'>Couverture Delta · position totale cible à S₁</div>"
+        f"<div class='trade-value' style='{main_style}'>{trade_instruction(scenario_hedge)}</div>"
+        f"<div class='trade-note'>Position totale pour neutraliser le Delta au scénario S₁.</div>"
+        f"<div style='border-top:1px solid #dbe3ef;margin:12px 0 10px;'></div>"
+        f"<div class='trade-label'>Décomposition de la couverture</div>"
+        f"<div style='display:flex;flex-wrap:wrap;gap:12px;margin-top:7px;'>"
+        f"<div style='flex:1;min-width:175px;padding:10px;border-radius:10px;background:rgba(125,135,155,.09);'>"
+        f"<div class='trade-label'>À S₀ · Couverture initiale</div>"
+        f"<div style='font-weight:750;font-size:1.05rem;'>{trade_instruction(initial_hedge)}</div></div>"
+        f"<div style='flex:1;min-width:175px;padding:10px;border-radius:10px;background:rgba(125,135,155,.09);'>"
+        f"<div class='trade-label'>À S₁ · Rééquilibrage</div>"
+        f"<div style='font-weight:750;font-size:1.05rem;'>{trade_instruction(change)}</div></div></div>"
+        f"<div class='trade-note' style='margin-top:10px;'>Le rééquilibrage suppose que la couverture initiale à S₀ a été exécutée. "
+        f"Sinon, seule la position totale cible à S₁ doit être mise en place.</div></div>"
+    )
+
+
+def render_hedge_rebalance(initial_hedge, scenario_hedge, key):
+    """Affichage unifié de la cible S₁ et de sa décomposition."""
+    st.markdown(hedge_decomposition_html(initial_hedge, scenario_hedge), unsafe_allow_html=True)
     with st.popover("ⓘ Comment lire le rééquilibrage ?"):
-        st.write("Une couverture positive correspond à des actions achetées, "
-                 "une couverture négative à des actions vendues à découvert. "
-                 "L'ordre de rééquilibrage est la différence entre la couverture cible "
-                 "au scénario et la couverture initiale. Il suppose que la couverture "
-                 "initiale a effectivement été mise en place et qu'aucune autre "
-                 "transaction n'est intervenue.")
+        st.write("La cible à S₁ est une position totale, pas un ordre à additionner aux deux lignes suivantes. "
+                 "La couverture initiale est mise en place à S₀ ; le rééquilibrage est la différence "
+                 "entre la cible S₁ et cette couverture initiale, si elle est toujours détenue. "
+                 "Les quantités positives correspondent à des achats et les quantités négatives à des ventes.")
 
 def render_breakdown(components, key):
     st.markdown("#### Attribution du P&L — approximation par les Greeks")
@@ -1752,18 +1769,8 @@ if mode == "Position individuelle":
         col.metric(label, current,
                    delta=f"à S₀ : {reference} {unit}", delta_color="off")
 
-    # Même carte de décision que la V10.1, sans composant HTML complexe.
-    rebalance_action = hedge_action(hedge_adjustment)
-    main_class = "buy" if rebalance_action == "ACHETER" else "sell" if rebalance_action == "VENDRE" else "neutral"
-    st.markdown(
-        f"<div class='trade-card {main_class}'>"
-        f"<div class='trade-label'>Couverture à mettre en place à S₀</div>"
-        f"<div class='trade-value'>{trade_instruction(hedge_initial)}</div>"
-        f"<div class='trade-label' style='margin-top:12px'>Ajustement à S₁ (couverture initiale déjà détenue)</div>"
-        f"<div class='trade-value'>{trade_instruction(hedge_adjustment)}</div>"
-        f"<div class='trade-note'>Position cible : {format_fr(hedge_new)} actions</div></div>",
-        unsafe_allow_html=True
-    )
+    # Décision unique et décomposition lisible à S₀ / S₁.
+    st.markdown(hedge_decomposition_html(hedge_initial, hedge_new), unsafe_allow_html=True)
 
     scenario_changes = []
     if abs(S1 - S0) > 1e-8:
@@ -2468,7 +2475,7 @@ if mode == "Position individuelle":
         pcol1.metric("Point mort (hors financement)", f"{format_fr(breakeven, 2)} {orm_currency_symbol}" if breakeven >= 0 else "Non atteignable")
         pcol2.metric("Perte maximale", loss_profile)
         pcol3.metric("Gain maximal", gain_profile)
-        st.caption("Valeurs à échéance, sans frais ni financement de la prime. Couverture cible initiale : " + trade_instruction(hedge_initial) + ". Détail des sensibilités dans « Payoff & Risk ladder ».")
+        st.caption("Valeurs à échéance, sans frais ni financement de la prime. Couverture Delta-neutre à S₀ (position cible théorique) : " + trade_instruction(hedge_initial) + ". Détail des sensibilités dans « Payoff & Risk ladder ».")
 
         hedge_class = "buy" if hedge_initial > 1e-12 else ("sell" if hedge_initial < -1e-12 else "neutral")
         hedge_word = hedge_action(hedge_initial)
@@ -2477,7 +2484,7 @@ if mode == "Position individuelle":
         st.markdown(f"""
             <div class='hedge-decision {hedge_class}'>
                 <div>
-                    <div class='hedge-decision-label'>Couverture Delta · ordre théorique</div>
+                    <div class='hedge-decision-label'>Couverture Delta-neutre à S₀ · position cible</div>
                     <div class='hedge-decision-action'>{hedge_word}</div>
                     <div class='hedge-decision-qty'>{format_fr(abs(hedge_initial), 2)} <span>ACTIONS</span></div>
                 </div>
@@ -2510,7 +2517,9 @@ if mode == "Position individuelle":
             - volatilité et taux sans risque constants ;
             - marché sans friction (pas de coûts de transaction ni bid-ask) ;
             - couverture Delta théoriquement continue ; l'application illustre un rééquilibrage discret entre S₀ et S₁ ;
-            - actions fractionnaires autorisées ;
+            - actions fractionnaires autorisées : les quantités affichées sont théoriques et arrondies pour la lecture ;
+            - temps écoulé converti en années sur une base de **365 jours** ;
+            - Vega exprimé pour **+1 point de volatilité** et Rho pour **+1 point de taux** (et non pour +100 points) ;
             - multiplicateur de contrat fixé à **1** : une option porte sur une unité de sous-jacent.
             """
         )
@@ -3020,23 +3029,23 @@ elif mode == "Portefeuille multi-options":
 
         if portfolio_hedge > 1e-12:
             st.markdown(
-                f"<div class='trade-card buy'><div class='trade-label'>Couverture Delta globale</div>"
+                f"<div class='trade-card buy'><div class='trade-label'>Couverture Delta-neutre à S₀ · position cible</div>"
                 f"<div class='trade-value'>ACHETER {format_fr(abs(portfolio_hedge), 2)} ACTIONS</div>"
-                f"<div class='trade-note'>Position de couverture nécessaire pour neutraliser le Delta agrégé du portefeuille.</div></div>",
+                f"<div class='trade-note'>Position cible théorique à S₀ pour neutraliser le Delta agrégé ; aucune exécution présumée.</div></div>",
                 unsafe_allow_html=True
             )
         elif portfolio_hedge < -1e-12:
             st.markdown(
-                f"<div class='trade-card sell'><div class='trade-label'>Couverture Delta globale</div>"
+                f"<div class='trade-card sell'><div class='trade-label'>Couverture Delta-neutre à S₀ · position cible</div>"
                 f"<div class='trade-value'>VENDRE {format_fr(abs(portfolio_hedge), 2)} ACTIONS</div>"
-                f"<div class='trade-note'>Position de couverture nécessaire pour neutraliser le Delta agrégé du portefeuille.</div></div>",
+                f"<div class='trade-note'>Position cible théorique à S₀ pour neutraliser le Delta agrégé ; aucune exécution présumée.</div></div>",
                 unsafe_allow_html=True
             )
         else:
             st.markdown(
-                "<div class='trade-card'><div class='trade-label'>Couverture Delta globale</div>"
+                "<div class='trade-card'><div class='trade-label'>Couverture Delta-neutre à S₀ · position cible</div>"
                 "<div class='trade-value'>PORTEFEUILLE DELTA-NEUTRE</div>"
-                "<div class='trade-note'>Aucune transaction sur le sous-jacent n'est nécessaire.</div></div>",
+                "<div class='trade-note'>Aucune position de couverture supplémentaire nécessaire à S₀.</div></div>",
                 unsafe_allow_html=True
             )
 
@@ -3223,18 +3232,7 @@ elif mode == "Portefeuille multi-options":
         )
 
         with ps4:
-            simulated_action = hedge_action(hedge_rebalancing)
-            action_class = "buy" if simulated_action == "ACHETER" else "sell" if simulated_action == "VENDRE" else "neutral"
-            st.markdown(
-                f"""
-                <div class="trade-card {action_class}" style="margin:0; min-height:116px; padding:.75rem .9rem;">
-                    <div class="trade-label">Ordre à passer (couverture initiale détenue)</div>
-                    <div class="trade-value" style="font-size:1.35rem;">{simulated_action} {format_fr(abs(hedge_rebalancing))}</div>
-                    <div class="trade-note">Position cible : {format_fr(simulated_hedge)} actions</div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+            st.markdown(hedge_decomposition_html(portfolio_hedge, simulated_hedge, compact=True), unsafe_allow_html=True)
 
 
         # --------------------------------------------------------
@@ -3587,22 +3585,22 @@ elif mode == "Portefeuille multi-options":
             "↓ Exporter les résultats du portefeuille (CSV)",
             data=result_csv([
                 ("Paramètres de référence", "Nombre de positions", number_positions, "options"),
-                ("Paramètres de référence", "Spot initial", portfolio_S0, "EUR"),
-                ("Scénario de marché", "Spot scénario", portfolio_S1, "EUR"),
-                ("Valorisation et P&L", "Valeur initiale", total_value, "EUR"),
+                ("Paramètres de référence", "Spot initial", portfolio_S0, orm_currency),
+                ("Scénario de marché", "Spot scénario", portfolio_S1, orm_currency),
+                ("Valorisation et P&L", "Valeur initiale", total_value, orm_currency),
                 ("Risques initiaux", "Delta agrégé", total_delta, "actions"),
-                ("Risques initiaux", "Gamma agrégé", total_gamma, "actions/EUR"),
-                ("Risques initiaux", "Vega agrégé", total_vega, "EUR/point de %"),
-                ("Risques initiaux", "Theta agrégé", total_theta, "EUR/jour"),
+                ("Risques initiaux", "Gamma agrégé", total_gamma, f"actions/{orm_currency}"),
+                ("Risques initiaux", "Vega agrégé", total_vega, f"{orm_currency}/point de %"),
+                ("Risques initiaux", "Theta agrégé", total_theta, f"{orm_currency}/jour"),
                 ("Risques initiaux", "Couverture initiale", portfolio_hedge, "actions"),
                 ("Risques simulés et couverture", "Couverture cible", simulated_hedge, "actions"),
                 ("Risques simulés et couverture", "Rééquilibrage", simulated_hedge - portfolio_hedge, "actions"),
                 ("Scénario de marché", "Choc volatilité", portfolio_vol_shift, "points de %"),
                 ("Scénario de marché", "Temps écoulé", portfolio_elapsed * 365, "jours"),
-                ("Valorisation et P&L", "Valeur scénario", simulated_value, "EUR"),
-                ("Valorisation et P&L", "P&L exact options", simulated_value - total_value, "EUR"),
-                ("Valorisation et P&L", "P&L couverture statique", portfolio_hedge * (portfolio_S1 - portfolio_S0), "EUR"),
-                ("Valorisation et P&L", "P&L couvert", simulated_value - total_value + portfolio_hedge * (portfolio_S1 - portfolio_S0), "EUR"),
+                ("Valorisation et P&L", "Valeur scénario", simulated_value, orm_currency),
+                ("Valorisation et P&L", "P&L exact options", simulated_value - total_value, orm_currency),
+                ("Valorisation et P&L", "P&L couverture statique", portfolio_hedge * (portfolio_S1 - portfolio_S0), orm_currency),
+                ("Valorisation et P&L", "P&L couvert", simulated_value - total_value + portfolio_hedge * (portfolio_S1 - portfolio_S0), orm_currency),
             ] + [
                 (f"Option {i+1} — {section}", name, value, unit)
                 for i, option in enumerate(portfolio_inputs)
@@ -3610,7 +3608,7 @@ elif mode == "Portefeuille multi-options":
                     ("Paramètres de référence", "Type", option["option_type"], ""),
                     ("Paramètres de référence", "Sens", option["position_type"], ""),
                     ("Paramètres de référence", "Quantité", option["quantity"], "options"),
-                    ("Paramètres de référence", "Strike", option["K"], "EUR"),
+                    ("Paramètres de référence", "Strike", option["K"], orm_currency),
                     ("Paramètres de référence", "Maturité", option["T"], "années"),
                     ("Paramètres de référence", "Volatilité", option["sigma_percent"], "%"),
                 ]
@@ -3675,24 +3673,12 @@ elif mode == "Portefeuille multi-options":
             st.caption("Pertes et gains extrêmes dépendent de la composition des positions ; ne pas déduire une perte maximale de la seule plage du graphique.")
         else:
             st.info("Échéances différentes : aucun point mort terminal unique n'est défini pour le portefeuille.")
-        st.caption("Couverture initiale cible : " + trade_instruction(portfolio_hedge) + ". Voir « Payoff & Risk ladder » pour les scénarios de spot.")
 
-        portfolio_hedge_class = "buy" if portfolio_hedge > 1e-12 else ("sell" if portfolio_hedge < -1e-12 else "neutral")
-        portfolio_delta_after = clean_zero(total_delta + portfolio_hedge)
+        portfolio_hedge_class = "buy" if simulated_hedge > 1e-12 else ("sell" if simulated_hedge < -1e-12 else "neutral")
+        portfolio_delta_after = clean_zero(simulated_delta + simulated_hedge)
         portfolio_neutral_status = "<span class='neutral-chip'>✓ DELTA NEUTRE</span>" if abs(portfolio_delta_after) < 1e-10 else ""
+        st.markdown(hedge_decomposition_html(portfolio_hedge, simulated_hedge), unsafe_allow_html=True)
         st.markdown(f"""
-            <div class='hedge-decision {portfolio_hedge_class}'>
-                <div>
-                    <div class='hedge-decision-label'>Couverture Delta globale · ordre théorique</div>
-                    <div class='hedge-decision-action'>{action}</div>
-                    <div class='hedge-decision-qty'>{format_fr(abs(portfolio_hedge), 2)} <span>ACTIONS</span></div>
-                </div>
-                <div class='hedge-breakdown'>
-                    Delta portefeuille <b>{format_fr_signed(total_delta, 4)}</b><br>
-                    Delta couverture <b>{format_fr_signed(portfolio_hedge, 4)}</b><br>
-                    Delta après hedge <b>{format_fr_signed(portfolio_delta_after, 4)}</b> {portfolio_neutral_status}
-                </div>
-            </div>
             <div class='risk-secondary-title'>Risques secondaires</div>
             <div class='risk-reading'>
                 <div class='risk-reading-item'><strong>Θ Theta / jour</strong><b>{format_fr_signed(total_theta, 4)} {orm_currency_symbol}</b><br>Effet temporel quotidien agrégé.</div>
@@ -3702,7 +3688,7 @@ elif mode == "Portefeuille multi-options":
             </div>
             <div class='risk-conclusion'>
                 <strong>Lecture du portefeuille</strong>
-                Portefeuille de {number_positions} positions. {portfolio_delta_text}. {portfolio_gamma_text} et {portfolio_vega_text.lower()}. Une couverture Delta-neutre nécessite de <b>{action.lower()} {format_fr(abs(portfolio_hedge), 2)} actions</b>. Après couverture, le Delta instantané est neutralisé tandis que les expositions Gamma, Vega et Theta restent présentes.
+                Portefeuille de {number_positions} positions. {portfolio_delta_text}. {portfolio_gamma_text} et {portfolio_vega_text.lower()}. Au scénario S₁, la couverture totale cible est de <b>{trade_instruction(simulated_hedge)}</b>. Si la couverture initiale à S₀ est déjà détenue, l’ajustement est de <b>{trade_instruction(hedge_rebalancing)}</b>. Après couverture, le Delta instantané est neutralisé tandis que les expositions Gamma, Vega et Theta restent présentes.
             </div>""", unsafe_allow_html=True)
 
 
@@ -3716,7 +3702,9 @@ elif mode == "Portefeuille multi-options":
             - volatilité et taux sans risque constants sur l'horizon considéré ;
             - marché sans friction dans le modèle (pas de coûts de transaction ni bid-ask) ;
             - couverture Delta théoriquement continue ; l'application illustre un rééquilibrage discret entre S₀ et S₁ ;
-            - actions fractionnaires autorisées ;
+            - actions fractionnaires autorisées : les quantités affichées sont théoriques et arrondies pour la lecture ;
+            - temps écoulé converti en années sur une base de **365 jours** ;
+            - Vega exprimé pour **+1 point de volatilité** et Rho pour **+1 point de taux** (et non pour +100 points) ;
             - multiplicateur de contrat fixé à **1** : une option porte ici sur une unité de sous-jacent.
 
             Ces hypothèses doivent être gardées à l'esprit lors de l'interprétation du P&L, des Greeks et de la couverture.
