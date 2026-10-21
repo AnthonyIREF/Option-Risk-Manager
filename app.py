@@ -10,6 +10,86 @@ from scipy.stats import norm
 
 
 # ============================================================
+# MODULE V12.3 INTÉGRÉ — AUCUN FICHIER SUPPLÉMENTAIRE
+# ============================================================
+
+def risk_metrics(spot0, spot1, delta0, delta1, gamma0, hedge0):
+    """Expositions signées, exprimées en actions et euros; sans seuil arbitraire."""
+    vals = np.array([spot0, spot1, delta0, delta1, gamma0, hedge0], dtype=float)
+    if not np.all(np.isfinite(vals)) or spot0 <= 0 or spot1 <= 0:
+        raise ValueError('Paramètres de diagnostic invalides.')
+    return {
+        'initial_residual': float(delta0 + hedge0),
+        'scenario_residual': float(delta1 + hedge0),
+        'rebalance': float(-delta1 - hedge0),
+        'gamma_delta_1pct': float(gamma0 * 0.01 * spot0),
+        'gamma_pnl_1pct': float(0.5 * gamma0 * (0.01 * spot0)**2),
+        'gamma_pnl_5pct': float(0.5 * gamma0 * (0.05 * spot0)**2),
+    }
+
+
+def static_hedge_pnl(spots, option_pnl, spot0, hedge0):
+    """P&L de revalorisation instantanée, hedge initial constant, hors portage/frais.
+
+    Les options sont revalorisées au même T, sigma et r. Il ne s'agit pas
+    d'un P&L réalisé ni d'une couverture dynamique autofinancée.
+    """
+    x = np.asarray(spots, dtype=float)
+    y = np.asarray(option_pnl, dtype=float)
+    if x.ndim != 1 or y.shape != x.shape or x.size < 2 or not np.all(np.isfinite(x)) or not np.all(np.isfinite(y)):
+        raise ValueError('Courbes P&L invalides.')
+    if not np.isfinite(spot0) or spot0 <= 0 or not np.isfinite(hedge0):
+        raise ValueError('Spot ou couverture invalide.')
+    return y, y + float(hedge0) * (x - float(spot0))
+
+
+def render_risk_diagnostic(spot0, spot1, delta0, delta1, gamma0, hedge0, key):
+    m = risk_metrics(spot0, spot1, delta0, delta1, gamma0, hedge0)
+    st.markdown('### Diagnostic automatique du risque')
+    st.caption('Diagnostic déterministe et explicable : aucun score opaque ni seuil de danger universel.')
+    if gamma0 > 1e-10:
+        st.info('Gamma positif : convexité locale positive. Le Delta augmente quand le spot monte, à paramètres constants.')
+    elif gamma0 < -1e-10:
+        st.warning('Gamma négatif : convexité locale négative. Le Delta diminue quand le spot monte, à paramètres constants ; la couverture peut nécessiter des ajustements importants.')
+    else:
+        st.info('Gamma initial proche de zéro en valeur absolue ; cela ne signifie pas une absence de risque.')
+    a,b,c = st.columns(3)
+    a.metric('Delta résiduel après choc', f"{m['scenario_residual']:+.3f} actions")
+    b.metric('Ordre de rééquilibrage', f"{abs(m['rebalance']):.3f} actions")
+    c.metric('Terme Gamma pour choc +1 %', f"{m['gamma_pnl_1pct']:+.2f} €")
+    direction = 'Acheter' if m['rebalance'] > 1e-9 else 'Vendre' if m['rebalance'] < -1e-9 else 'Aucun ordre :'
+    st.write(f"**Action théorique :** {direction} {abs(m['rebalance']):.3f} action(s) pour retrouver la neutralité Delta au spot simulé.")
+    st.caption(f"Variation locale estimée du Delta pour +1 % de spot : {m['gamma_delta_1pct']:+.3f} actions. "
+               'Approximation Gamma × ΔS autour de S₀ ; non valable pour des chocs importants. '
+               'Le diagnostic n’évalue pas la VaR, la liquidité ni les risques de modèle.')
+
+
+def render_static_pnl_comparison(spots, option_pnl, spot0, current_spot, hedge0, key):
+    bare, covered = static_hedge_pnl(spots, option_pnl, spot0, hedge0)
+    spots = np.asarray(spots, dtype=float)
+    st.markdown('### P&L non couvert / couvert — comparaison directe')
+    st.caption('Même scénario de spot pour les deux courbes ; options revalorisées à maturité, volatilité et taux constants. '
+               'Couverture = nombre d’actions fixé au départ (−Delta initial), sans rééquilibrage, frais ni financement. '
+               'Ce sont des variations de valeur théoriques, pas des gains réalisés à échéance.')
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=spots, y=bare, mode='lines', name='Options seules (non couvert)', line=dict(color='#c2410c', width=2.5)))
+    fig.add_trace(go.Scatter(x=spots, y=covered, mode='lines', name='Options + couverture Delta statique', line=dict(color='#2563eb', width=2.5)))
+    fig.add_vline(x=spot0, line_dash='dot', line_color='#64748b')
+    fig.add_vline(x=current_spot, line_dash='dash', line_color='#16a34a')
+    fig.add_hline(y=0, line_color='#94a3b8', line_width=1)
+    fig.update_layout(template='plotly_white', height=430, xaxis_title='Cours du sous-jacent S (€)',
+                      yaxis_title='Variation de valeur P&L (€)', legend=dict(orientation='h', y=-0.28),
+                      margin=dict(l=40,r=30,t=25,b=100))
+    st.plotly_chart(fig, width='stretch', key=key)
+    pnl_bare = float(np.interp(current_spot, spots, bare))
+    pnl_covered = float(np.interp(current_spot, spots, covered))
+    a,b,c = st.columns(3)
+    a.metric('P&L options seules (≈)', f'{pnl_bare:+.2f} €')
+    b.metric('P&L avec couverture initiale (≈)', f'{pnl_covered:+.2f} €')
+    c.metric('Effet de la couverture (≈)', f'{pnl_covered-pnl_bare:+.2f} €')
+    st.caption('Valeurs interpolées sur la grille de spots du graphique. Pour le P&L exact au curseur, utiliser les indicateurs de scénario déjà présents.')
+
+# ============================================================
 # CONFIGURATION STREAMLIT
 # ============================================================
 
@@ -1317,6 +1397,58 @@ st.markdown(
 )
 
 # ============================================================
+# V12.6 — TRANSFERT VOLONTAIRE DES DONNÉES DE MARCHÉ
+# ============================================================
+
+def transfer_market_inputs_v126(destination, ticker, name, currency, date, spot, vol):
+    """Transfert explicite des deux seules hypothèses communes : spot et volatilité.
+
+    Les autres paramètres (strike, taux, maturité, quantités) sont préservés.
+    Les trois modes conservent leurs entrées manuelles.
+    """
+    spot, vol = float(spot), float(vol)
+    if not (np.isfinite(spot) and spot > 0 and np.isfinite(vol) and vol > 0):
+        raise ValueError("Cours ou volatilité historique invalide.")
+    vol_pct = 100.0 * vol
+    if vol_pct > 300.0:
+        raise ValueError("Volatilité supérieure à la limite du module Monte-Carlo (300 %).")
+    if destination == "Position individuelle":
+        st.session_state["single_spot"] = spot
+        st.session_state["single_sigma"] = vol_pct
+        st.session_state["single_global_simulated_spot"] = spot
+        st.session_state["_orm_last_single_spot"] = spot
+    elif destination == "Portefeuille multi-options":
+        st.session_state["portfolio_spot"] = spot
+        st.session_state["portfolio_simulated_spot"] = spot
+        st.session_state["_orm_last_portfolio_spot"] = spot
+        for i in range(int(st.session_state.get("portfolio_count", 2))):
+            st.session_state[f"portfolio_sigma_{i}"] = vol_pct
+    elif destination == "Monte-Carlo & couverture dynamique":
+        st.session_state["mc_spot"] = spot
+        st.session_state["mc_vol"] = vol_pct
+    else:
+        raise ValueError("Mode de destination inconnu.")
+    # Reset only scenario shocks that could be inherited from another asset.
+    if destination == "Position individuelle":
+        st.session_state["single_global_simulated_spot"] = spot
+        for k, v in (("v91_single_vol_shift", 0.0), ("v91_single_elapsed", 0.0), ("v911_single_elapsed_days", 0)):
+            if k in st.session_state:
+                st.session_state[k] = v
+    elif destination == "Portefeuille multi-options":
+        st.session_state["v91_portfolio_vol_shift"] = 0.0
+        st.session_state["v91_portfolio_elapsed"] = 0.0
+    st.session_state["orm_mode"] = destination
+    st.session_state["orm_import_currency"] = currency
+    st.session_state["orm_import_ticker"] = ticker
+    for _mode_idx in range(3):
+        st.session_state[f"orm_currency_select_{_mode_idx}"] = currency
+    st.session_state["orm_v126_import"] = {
+        "ticker": ticker, "name": name, "currency": currency,
+        "date": date, "spot": spot, "volatility": vol_pct,
+        "destination": destination,
+    }
+
+# ============================================================
 # CHOIX DU MODE
 # ============================================================
 
@@ -1325,9 +1457,11 @@ mode = st.radio(
     [
         "Position individuelle",
         "Portefeuille multi-options",
-        "Monte-Carlo & couverture dynamique"
+        "Monte-Carlo & couverture dynamique",
+        "Données réelles"
     ],
-    horizontal=True
+    horizontal=True,
+    key="orm_mode"
 )
 
 st.divider()
@@ -1338,6 +1472,30 @@ st.divider()
 # ============================================================
 
 if mode == "Position individuelle":
+    orm_currency = st.session_state.get("orm_import_currency", "EUR")
+    if orm_currency not in ("EUR", "USD"):
+        orm_currency = "EUR"
+    orm_currency = st.selectbox(
+        "Devise des montants (sans conversion de change)",
+        ["EUR", "USD"],
+        index=0 if orm_currency == "EUR" else 1,
+        key="orm_currency_select_0",
+        help="La devise est une unité d'affichage ; aucun taux de change n'est appliqué.",
+    )
+    st.session_state["orm_import_currency"] = orm_currency
+    orm_currency_symbol = "€" if orm_currency == "EUR" else "$"
+    _import_v126 = st.session_state.get("orm_v126_import")
+    if _import_v126 and _import_v126.get("destination") == "Position individuelle":
+        st.info(f"Données importées : {_import_v126['name']} ({_import_v126['ticker']}) · "
+                f"{_import_v126['date']} · {_import_v126['currency']} · "
+                f"Spot {_import_v126['spot']:.2f} · σ historique {_import_v126['volatility']:.2f} %. "
+                "Les autres paramètres restent manuels. Les données ne sont pas synchronisées automatiquement.")
+
+        st.caption("Strike conservé après importation : vous pouvez le rapprocher du spot si vous le souhaitez.")
+        st.button("Proposer un strike proche du spot importé", key="orm_strike_suggestion_0",
+                  on_click=lambda: st.session_state.__setitem__("single_strike",
+                      float(round(st.session_state["orm_v126_import"]["spot"], 2))))
+
 
     # --------------------------------------------------------
     # SIDEBAR
@@ -1381,13 +1539,13 @@ if mode == "Position individuelle":
     )
 
     S0 = st.sidebar.number_input(
-        "Spot de référence S₀ (€)",
+        f"Spot de référence S₀ ({orm_currency_symbol})",
         step=1.0,
         key="single_spot"
     )
 
     K = st.sidebar.number_input(
-        "Strike K (€)",
+        f"Strike K ({orm_currency_symbol})",
         step=1.0,
         key="single_strike"
     )
@@ -1517,7 +1675,7 @@ if mode == "Position individuelle":
                 st.session_state["single_global_simulated_spot"] = float(min(spot_max, max(spot_min, float(st.session_state["single_global_simulated_spot"]) * (1 + shock))))
 
     S1 = st.slider(
-        "Spot simulé S₁ (€)",
+        f"Spot simulé S₁ ({orm_currency_symbol})",
         min_value=float(spot_min),
         max_value=float(spot_max),
         step=float(max(S0 / 200, 0.01)),
@@ -1571,7 +1729,7 @@ if mode == "Position individuelle":
     spot_change_pct = 100 * (S1 / S0 - 1)
 
     st.caption(
-        f"Référence S₀ : {format_fr(S0)} € · Spot simulé S₁ : {format_fr(S1)} € "
+        f"Référence S₀ : {format_fr(S0)} {orm_currency_symbol} · Spot simulé S₁ : {format_fr(S1)} {orm_currency_symbol} "
         f"({format_fr(spot_change_pct)} %) · Ajustement : "
         f"{hedge_action(hedge_adjustment)} {format_fr(abs(hedge_adjustment))} actions"
     )
@@ -1580,10 +1738,10 @@ if mode == "Position individuelle":
     st.markdown("#### Résultats actualisés à S₁")
     live_cols = st.columns(5)
     live_specs = [
-        ("Prix unitaire (€)", "unit_price", 2, "€"),
-        ("Valeur position (€)", "position_value", 2, "€"),
+        (f"Prix unitaire ({orm_currency_symbol})", "unit_price", 2, f"{orm_currency_symbol}"),
+        (f"Valeur position ({orm_currency_symbol})", "position_value", 2, f"{orm_currency_symbol}"),
         ("Delta (actions)", "position_delta", 2, "actions"),
-        ("Gamma (actions/€)", "position_gamma", 4, "actions/€"),
+        (f"Gamma (actions/{orm_currency_symbol})", "position_gamma", 4, f"actions/{orm_currency_symbol}"),
         ("Couverture cible (actions)", "hedge_shares", 2, "actions"),
     ]
     for col, (label, field, digits, unit) in zip(live_cols, live_specs):
@@ -1633,8 +1791,8 @@ if mode == "Position individuelle":
                 <span class="badge">{position_type_display.upper()}</span>
                 <span class="badge">{option_type_display.upper()}</span>
                 <span class="badge">{quantity} OPTIONS</span>
-                <span class="badge">S₀ {format_fr(S0, 2)} €</span>
-                <span class="badge">K {format_fr(K, 2)} €</span>
+                <span class="badge">S₀ {format_fr(S0, 2)} {orm_currency_symbol}</span>
+                <span class="badge">K {format_fr(K, 2)} {orm_currency_symbol}</span>
                 <span class="badge">σ {format_fr(sigma_percent, 1)} %</span>
             </div>
             <div class="section-kicker">Position</div>
@@ -1653,7 +1811,7 @@ if mode == "Position individuelle":
 
         info2.metric(
             "Spot / Strike",
-            f"{format_fr(S0, 2)} / {format_fr(K, 2)} €"
+            f"{format_fr(S0, 2)} / {format_fr(K, 2)} {orm_currency_symbol}"
         )
 
         info3.metric(
@@ -1686,7 +1844,7 @@ if mode == "Position individuelle":
             v1.metric("Δ différences finies", f"{format_fr(fd_check['delta_fd'], 8)}", delta=f"erreur {fd_check['delta_error']:.2e}", delta_color="off")
             v2.metric("Γ analytique", f"{format_fr(fd_check['gamma_analytic'], 8)}")
             v2.metric("Γ différences finies", f"{format_fr(fd_check['gamma_fd'], 8)}", delta=f"erreur {fd_check['gamma_error']:.2e}", delta_color="off")
-            st.caption(f"Pas de différence finie h = {fd_check['h']:.4g} €.")
+            st.caption(f"Pas de différence finie h = {fd_check['h']:.4g} {orm_currency_symbol}.")
             if parity_error < 1e-8 and within_tol(fd_check["delta_error"], fd_check["delta_analytic"]) and within_tol(fd_check["gamma_error"], fd_check["gamma_analytic"]):
                 st.success("✓ Contrôles numériques réussis : cohérence Call/Put et Greeks analytiques validés numériquement.")
             else:
@@ -1706,12 +1864,12 @@ if mode == "Position individuelle":
 
         col1.metric(
             "Prix unitaire",
-            f"{format_fr(position_initiale['unit_price'], 2)} €"
+            f"{format_fr(position_initiale['unit_price'], 2)} {orm_currency_symbol}"
         )
 
         col2.metric(
             "Valeur position",
-            f"{format_fr(position_initiale['position_value'], 2)} €"
+            f"{format_fr(position_initiale['position_value'], 2)} {orm_currency_symbol}"
         )
 
         col3.metric(
@@ -1737,17 +1895,17 @@ if mode == "Position individuelle":
 
         risk1.metric(
             "Vega (+1 pt de vol.)",
-            f"{format_fr(position_initiale['position_vega'], 4)} €"
+            f"{format_fr(position_initiale['position_vega'], 4)} {orm_currency_symbol}"
         )
 
         risk2.metric(
             "Theta / jour",
-            f"{format_fr(position_initiale['position_theta_daily'], 4)} €"
+            f"{format_fr(position_initiale['position_theta_daily'], 4)} {orm_currency_symbol}"
         )
 
         risk3.metric(
             "Rho (+1 pt de taux)",
-            f"{format_fr(position_initiale['position_rho'], 4)} €"
+            f"{format_fr(position_initiale['position_rho'], 4)} {orm_currency_symbol}"
         )
 
 
@@ -1766,14 +1924,14 @@ if mode == "Position individuelle":
             st.markdown(
                 f"<div class='trade-card buy'><div class='trade-label'>Action trader</div>"
                 f"<div class='trade-value'>ACHETER {format_fr(hedge_quantity, 2)} actions</div>"
-                f"<div class='trade-note'>Couverture nécessaire pour rendre la position Delta-neutre au spot S₀ = {format_fr(S0, 2)} €.</div></div>",
+                f"<div class='trade-note'>Couverture nécessaire pour rendre la position Delta-neutre au spot S₀ = {format_fr(S0, 2)} {orm_currency_symbol}.</div></div>",
                 unsafe_allow_html=True
             )
         elif hedge_initial < -1e-12:
             st.markdown(
                 f"<div class='trade-card sell'><div class='trade-label'>Action trader</div>"
                 f"<div class='trade-value'>VENDRE {format_fr(hedge_quantity, 2)} actions</div>"
-                f"<div class='trade-note'>Couverture nécessaire pour rendre la position Delta-neutre au spot S₀ = {format_fr(S0, 2)} €.</div></div>",
+                f"<div class='trade-note'>Couverture nécessaire pour rendre la position Delta-neutre au spot S₀ = {format_fr(S0, 2)} {orm_currency_symbol}.</div></div>",
                 unsafe_allow_html=True
             )
         else:
@@ -1797,7 +1955,7 @@ if mode == "Position individuelle":
         )
 
         st.markdown(
-            f"<div class='scenario-strip'><div class='scenario-item'>Spot initial<b>{format_fr(S0)} €</b></div><div class='scenario-item'>Spot simulé<b>{format_fr(S1, 2)} €</b></div><div class='scenario-item'>Variation<b>{format_fr_signed(spot_change_pct, 2)} %</b></div></div>",
+            f"<div class='scenario-strip'><div class='scenario-item'>Spot initial<b>{format_fr(S0)} {orm_currency_symbol}</b></div><div class='scenario-item'>Spot simulé<b>{format_fr(S1, 2)} {orm_currency_symbol}</b></div><div class='scenario-item'>Variation<b>{format_fr_signed(spot_change_pct, 2)} %</b></div></div>",
             unsafe_allow_html=True
         )
 
@@ -1807,8 +1965,8 @@ if mode == "Position individuelle":
 
         sim1.metric(
             "Spot simulé",
-            f"{format_fr(S1)} €",
-            delta=f"{format_fr_signed(S1 - S0, 2)} €"
+            f"{format_fr(S1)} {orm_currency_symbol}",
+            delta=f"{format_fr_signed(S1 - S0, 2)} {orm_currency_symbol}"
         )
 
         sim2.metric(
@@ -1882,7 +2040,7 @@ if mode == "Position individuelle":
         if True:
             action = "acheter" if hedge_new > 0 else "vendre" if hedge_new < 0 else "ne détenir aucune"
             explain_graph("Couverture Delta",
-                          f"À S₁ = {format_fr(S1, 2)} €, le Delta de la position vaut {format_fr(position_S1['position_delta'], 4)}. La couverture neutralise localement ce Delta.",
+                          f"À S₁ = {format_fr(S1, 2)} {orm_currency_symbol}, le Delta de la position vaut {format_fr(position_S1['position_delta'], 4)}. La couverture neutralise localement ce Delta.",
                           f"Il faut {action} {format_fr(abs(hedge_new), 2)} action(s). Lorsque le spot ou les paramètres changent, cette quantité doit être recalculée.")
         st.subheader("Gamma en fonction du spot")
 
@@ -1891,7 +2049,7 @@ if mode == "Position individuelle":
         if True:
             gamma_now = position_S1["position_gamma"]
             explain_graph("Sensibilité de la couverture",
-                          f"Gamma = {format_fr(gamma_now, 4)} actions/€. Pour un mouvement de spot de 1 €, le Delta varie approximativement de {format_fr(gamma_now, 4)} action(s).",
+                          f"Gamma = {format_fr(gamma_now, 4)} actions/{orm_currency_symbol}. Pour un mouvement de spot de 1 {orm_currency_symbol}, le Delta varie approximativement de {format_fr(gamma_now, 4)} action(s).",
                           "La bande orange représente |Γ| ≥ 50 % du maximum de la courbe : c'est un repère visuel conventionnel, pas un seuil réglementaire. Le Gamma reste un risque après couverture Delta.")
 
         st.markdown("#### Explorer les Greeks selon le spot")
@@ -1900,14 +2058,14 @@ if mode == "Position individuelle":
         greek_choice = st.selectbox("Greek affiché", ["Delta", "Gamma", "Vega", "Theta"], key="single_greek_selector_v931")
         greek_spots = np.linspace(0.6 * S0, 1.4 * S0, 101)
         greek_rows = [option_position(float(z), K, T1, r, sigma1, option_type, position_type, quantity) for z in greek_spots]
-        greek_keys = {"Delta": ("position_delta", "actions"), "Gamma": ("position_gamma", "actions/€"),
-                      "Vega": ("position_vega", "€/point de vol."), "Theta": ("position_theta_annual", "€/an")}
+        greek_keys = {"Delta": ("position_delta", "actions"), "Gamma": ("position_gamma", f"actions/{orm_currency_symbol}"),
+                      "Vega": ("position_vega", f"{orm_currency_symbol}/point de vol."), "Theta": ("position_theta_annual", f"{orm_currency_symbol}/an")}
         gkey, gunit = greek_keys[greek_choice]
         fig_greek = go.Figure(go.Scatter(x=greek_spots, y=[z[gkey] for z in greek_rows], mode="lines", name=greek_choice, line=dict(color="#2563eb", width=3)))
         fig_greek.add_vline(x=S1, line_dash="dash", line_color="#d97706")
         add_moneyness_zones(fig_greek, K, option_type, float(greek_spots[0]), float(greek_spots[-1]))
 
-        fig_greek.update_layout(template="plotly_white", height=380, xaxis_title="Spot (€)", yaxis_title=f"{greek_choice} ({gunit})", margin=dict(l=25,r=20,t=85,b=45))
+        fig_greek.update_layout(template="plotly_white", height=380, xaxis_title=f"Spot ({orm_currency_symbol})", yaxis_title=f"{greek_choice} ({gunit})", margin=dict(l=25,r=20,t=85,b=45))
         st.plotly_chart(fig_greek, width="stretch", key="single_greek_plot_v931")
         st.caption("Zones de moneyness : OTM (bleu), ITM (vert), ATM au strike K (trait violet). Pour un Put, les zones sont inversées par rapport à un Call.")
 
@@ -1924,7 +2082,7 @@ if mode == "Position individuelle":
 
         st.info(
             f"Maximum de |Gamma| sur la plage étudiée : "
-            f"S = {format_fr(spot_gamma_max, 2)} € ; "
+            f"S = {format_fr(spot_gamma_max, 2)} {orm_currency_symbol} ; "
             f"Gamma = {format_fr(gamma_max, 4)}."
         )
 
@@ -2017,17 +2175,17 @@ if mode == "Position individuelle":
 
         pnl1.metric(
             "P&L option",
-            f"{format_fr(option_pnl, 2)} €"
+            f"{format_fr(option_pnl, 2)} {orm_currency_symbol}"
         )
 
         pnl2.metric(
             "P&L couverture actions",
-            f"{format_fr(stock_pnl, 2)} €"
+            f"{format_fr(stock_pnl, 2)} {orm_currency_symbol}"
         )
 
         pnl3.metric(
             "P&L position couverte",
-            f"{format_fr(hedged_pnl, 2)} €"
+            f"{format_fr(hedged_pnl, 2)} {orm_currency_symbol}"
         )
 
         approx1, approx2, approx3 = (
@@ -2036,17 +2194,17 @@ if mode == "Position individuelle":
 
         approx1.metric(
             "P&L exact",
-            f"{format_fr(option_pnl, 2)} €"
+            f"{format_fr(option_pnl, 2)} {orm_currency_symbol}"
         )
 
         approx2.metric(
             "Approximation Delta",
-            f"{format_fr(pnl_delta, 2)} €"
+            f"{format_fr(pnl_delta, 2)} {orm_currency_symbol}"
         )
 
         approx3.metric(
             "Approximation Delta-Gamma",
-            f"{format_fr(pnl_delta_gamma, 2)} €"
+            f"{format_fr(pnl_delta_gamma, 2)} {orm_currency_symbol}"
         )
 
         st.markdown("#### Comparaison des méthodes de P&L")
@@ -2082,6 +2240,26 @@ if mode == "Position individuelle":
         )
 
 
+        # V12.3 — diagnostic explicable et comparaison de couverture statique.
+        render_risk_diagnostic(
+            spot0=S0,
+            spot1=S1,
+            delta0=position_initiale["position_delta"],
+            delta1=position_S1["position_delta"],
+            gamma0=position_initiale["position_gamma"],
+            hedge0=hedge_initial,
+            key="v123_single_risk",
+        )
+        render_static_pnl_comparison(
+            spots=error_spots,
+            option_pnl=exact_spot_only,
+            spot0=S0,
+            current_spot=S1,
+            hedge0=hedge_initial,
+            key="v123_single_static",
+        )
+
+
     with single_tab_stress:
         # --------------------------------------------------------
         # STRESS TESTS
@@ -2110,8 +2288,8 @@ if mode == "Position individuelle":
         heatmap = go.Figure(go.Heatmap(
             x=heat_spots, y=100 * heat_vols, z=heat_values,
             colorscale="RdYlGn", zmid=0,
-            colorbar=dict(title="P&L (€)"),
-            hovertemplate="Spot : %{x:.2f} €<br>Volatilité : %{y:.2f} %<br>P&L : %{z:.2f} €<extra></extra>"))
+            colorbar=dict(title=f"P&L ({orm_currency_symbol})"),
+            hovertemplate=("Spot : %{x:.2f} €<br>Volatilité : %{y:.2f} %<br>P&L : %{z:.2f} €<extra></extra>".replace("€", orm_currency_symbol))))
         # Sur une carte spot × volatilité, ATM est la frontière verticale S=K.
         heatmap.add_vline(x=K, line_dash="dot", line_color="#7c3aed", line_width=2)
         heatmap.add_annotation(x=K, y=1.06, yref="paper", text="ATM · K", showarrow=False,
@@ -2123,23 +2301,23 @@ if mode == "Position individuelle":
         heatmap.add_trace(go.Scatter(x=[S0], y=[100*sigma], mode="markers",
                        marker=dict(color="#111827", size=11, symbol="x"), name="Référence"))
         heatmap.update_layout(template="plotly_white", height=410,
-                              xaxis_title="Spot (€)", yaxis_title="Volatilité annualisée (%)",
+                              xaxis_title=f"Spot ({orm_currency_symbol})", yaxis_title="Volatilité annualisée (%)",
                               margin=dict(l=25, r=25, t=70, b=45))
         st.plotly_chart(heatmap, width="stretch", key="single_pnl_heatmap_v93")
 
         st.markdown("### Carte de couverture Delta — spot × volatilité")
         with st.popover("ⓘ Comment lire la carte de couverture ?"):
-            st.write("En colonnes : spot (€). En lignes : volatilité annualisée (%). Chaque case donne le nombre signé d'actions de couverture : positif = ACHETER (vert), négatif = VENDRE (rouge). Le marqueur noir désigne les paramètres initiaux. Les variations de couleur montrent comment la couverture doit être adaptée quand le spot et la volatilité changent ensemble, à maturité constante.")
+            st.write(f"En colonnes : spot ({orm_currency_symbol}). En lignes : volatilité annualisée (%). Chaque case donne le nombre signé d'actions de couverture : positif = ACHETER (vert), négatif = VENDRE (rouge). Le marqueur noir désigne les paramètres initiaux. Les variations de couleur montrent comment la couverture doit être adaptée quand le spot et la volatilité changent ensemble, à maturité constante.")
         hedge_grid = np.array([[
             -option_position(float(z), K, T, r, float(v), option_type, position_type, quantity)["position_delta"]
             for z in heat_spots] for v in heat_vols])
         hedge_fig = go.Figure(go.Heatmap(x=heat_spots, y=100*heat_vols, z=hedge_grid,
              colorscale="RdYlGn", zmid=0, colorbar=dict(title="Actions"),
-             hovertemplate="Spot : %{x:.2f} €<br>Volatilité : %{y:.2f} %<br>Couverture : %{z:.2f} actions<extra></extra>"))
+             hovertemplate=("Spot : %{x:.2f} €<br>Volatilité : %{y:.2f} %<br>Couverture : %{z:.2f} actions<extra></extra>".replace("€", orm_currency_symbol))))
         hedge_fig.add_vline(x=K, line_dash="dot", line_color="#7c3aed", line_width=2)
         hedge_fig.add_trace(go.Scatter(x=[S0], y=[100*sigma], mode="markers",
                                     marker=dict(color="#111827", size=11, symbol="x"), name="Référence"))
-        hedge_fig.update_layout(template="plotly_white", height=410, xaxis_title="Spot (€)",
+        hedge_fig.update_layout(template="plotly_white", height=410, xaxis_title=f"Spot ({orm_currency_symbol})",
                                 yaxis_title="Volatilité annualisée (%)", margin=dict(l=25,r=25,t=70,b=45))
         st.plotly_chart(hedge_fig, width="stretch", key="single_hedge_heatmap_v931")
 
@@ -2159,8 +2337,8 @@ if mode == "Position individuelle":
                                             mode="lines", name="P&L couvert", line=dict(color="#16a34a", width=3)))
             fig_stress.add_hline(y=0, line_color="#94a3b8", line_width=1)
             fig_stress.add_vline(x=S0, line_dash="dash", line_color="#64748b")
-            fig_stress.update_layout(template="plotly_white", height=360, xaxis_title="Spot stressé (€)",
-                                     yaxis_title="P&L (€)", margin=dict(l=20,r=20,t=30,b=75),
+            fig_stress.update_layout(template="plotly_white", height=360, xaxis_title=f"Spot stressé ({orm_currency_symbol})",
+                                     yaxis_title=f"P&L ({orm_currency_symbol})", margin=dict(l=20,r=20,t=30,b=75),
                                      legend=dict(orientation="h", y=-0.3))
             st.plotly_chart(fig_stress, width="stretch", key="single_spot_stress_v910")
             with st.popover("ⓘ Comment lire le stress du spot ?"):
@@ -2181,11 +2359,11 @@ if mode == "Position individuelle":
                     line=dict(color="#2563eb", width=3)))
             fig_vol.add_vline(x=sigma*100, line_dash="dash", line_color="#64748b")
             fig_vol.update_layout(template="plotly_white", height=360,
-                                  xaxis_title="Volatilité annualisée (%)", yaxis_title="Valeur (€)",
+                                  xaxis_title="Volatilité annualisée (%)", yaxis_title=f"Valeur ({orm_currency_symbol})",
                                   margin=dict(l=20,r=20,t=30,b=75))
             st.plotly_chart(fig_vol, width="stretch", key="single_vol_stress_v910")
             with st.popover("ⓘ Comment lire le stress de volatilité ?"):
-                st.write("Axe horizontal : volatilité annualisée (%). Axe vertical : valeur de la position (€). "
+                st.write(f"Axe horizontal : volatilité annualisée (%). Axe vertical : valeur de la position ({orm_currency_symbol}). "
                          "La courbe montre la revalorisation de la position pour chaque volatilité, à spot et maturité fixés. "
                          "La ligne verticale pointillée est la volatilité initiale. Une pente croissante traduit un Vega positif ; "
                          "une pente décroissante un Vega négatif. Ce graphique est un stress à spot de référence fixe : "
@@ -2230,8 +2408,8 @@ if mode == "Position individuelle":
         current_delta_residual = position_S1["position_delta"] + hedge_initial
         sc1, sc2, sc3 = st.columns(3)
         sc1.metric("Delta après choc, hedge initial", format_fr(current_delta_residual, 4) + " actions")
-        sc2.metric("Gamma au scénario", format_fr(position_S1["position_gamma"], 4) + " actions/€")
-        sc3.metric("Spot du scénario", format_fr(S1, 2) + " €")
+        sc2.metric("Gamma au scénario", format_fr(position_S1["position_gamma"], 4) + f" actions/{orm_currency_symbol}")
+        sc3.metric("Spot du scénario", format_fr(S1, 2) + f" {orm_currency_symbol}")
         with st.popover("ⓘ Comment lire le diagnostic ?"):
             st.write("La couverture initiale neutralise le Delta au spot S₀. "
                      "Après un choc vers S₁, le Delta des options change, notamment à cause du Gamma. "
@@ -2263,13 +2441,13 @@ if mode == "Position individuelle":
             <div class='risk-hero'>
                 <div class='risk-hero-kicker'>Risk Summary · Position individuelle</div>
                 <div class='risk-hero-title'>{position_type_display.upper()} {option_type_display.upper()} × {quantity}</div>
-                <div class='risk-hero-sub'>Synthèse de l’exposition et décision de couverture · S₀ {format_fr(S0, 2)} € · K {format_fr(K, 2)} € · σ {format_fr(sigma_percent, 2)} %</div>
+                <div class='risk-hero-sub'>Synthèse de l’exposition et décision de couverture · S₀ {format_fr(S0, 2)} {orm_currency_symbol} · K {format_fr(K, 2)} {orm_currency_symbol} · σ {format_fr(sigma_percent, 2)} %</div>
             </div>
             <div class='summary-shell'>
                 <div class='summary-grid'>
                     <div class='summary-kpi'><div class='summary-kpi-label'>Δ Delta</div><div class='summary-kpi-value'>{format_fr_signed(delta_value, 4)}</div><div class='summary-kpi-note'>{delta_text}</div></div>
                     <div class='summary-kpi'><div class='summary-kpi-label'>Γ Gamma</div><div class='summary-kpi-value'>{format_fr_signed(gamma_value, 4)}</div><div class='summary-kpi-note'>{gamma_text}</div></div>
-                    <div class='summary-kpi'><div class='summary-kpi-label'>ν Vega</div><div class='summary-kpi-value'>{format_fr_signed(vega_value, 4)} €</div><div class='summary-kpi-note'>{vega_text}</div></div>
+                    <div class='summary-kpi'><div class='summary-kpi-label'>ν Vega</div><div class='summary-kpi-value'>{format_fr_signed(vega_value, 4)} {orm_currency_symbol}</div><div class='summary-kpi-note'>{vega_text}</div></div>
                 </div>
             </div>""", unsafe_allow_html=True)
 
@@ -2279,15 +2457,15 @@ if mode == "Position individuelle":
         is_call = option_type.lower() == "call"
         if is_call:
             breakeven = K + premium_total / quantity * (1 if is_long else 1)
-            loss_profile = f"{format_fr(premium_total, 2)} € (prime payée)" if is_long else "Théoriquement illimitée"
-            gain_profile = "Théoriquement illimité" if is_long else f"{format_fr(premium_total, 2)} € (prime reçue)"
+            loss_profile = f"{format_fr(premium_total, 2)} {orm_currency_symbol} (prime payée)" if is_long else "Théoriquement illimitée"
+            gain_profile = "Théoriquement illimité" if is_long else f"{format_fr(premium_total, 2)} {orm_currency_symbol} (prime reçue)"
         else:
             breakeven = K - premium_total / quantity
-            loss_profile = f"{format_fr(premium_total, 2)} € (prime payée)" if is_long else f"{format_fr(max(0.0, K * quantity - premium_total), 2)} € (si spot nul)"
-            gain_profile = f"{format_fr(max(0.0, K * quantity - premium_total), 2)} € (si spot nul)" if is_long else f"{format_fr(premium_total, 2)} € (prime reçue)"
+            loss_profile = f"{format_fr(premium_total, 2)} {orm_currency_symbol} (prime payée)" if is_long else f"{format_fr(max(0.0, K * quantity - premium_total), 2)} {orm_currency_symbol} (si spot nul)"
+            gain_profile = f"{format_fr(max(0.0, K * quantity - premium_total), 2)} {orm_currency_symbol} (si spot nul)" if is_long else f"{format_fr(premium_total, 2)} {orm_currency_symbol} (prime reçue)"
         st.markdown("#### Profil de payoff à échéance")
         pcol1, pcol2, pcol3 = st.columns(3)
-        pcol1.metric("Point mort (hors financement)", f"{format_fr(breakeven, 2)} €" if breakeven >= 0 else "Non atteignable")
+        pcol1.metric("Point mort (hors financement)", f"{format_fr(breakeven, 2)} {orm_currency_symbol}" if breakeven >= 0 else "Non atteignable")
         pcol2.metric("Perte maximale", loss_profile)
         pcol3.metric("Gain maximal", gain_profile)
         st.caption("Valeurs à échéance, sans frais ni financement de la prime. Couverture cible initiale : " + trade_instruction(hedge_initial) + ". Détail des sensibilités dans « Payoff & Risk ladder ».")
@@ -2311,10 +2489,10 @@ if mode == "Position individuelle":
             </div>
             <div class='risk-secondary-title'>Risques secondaires</div>
             <div class='risk-reading'>
-                <div class='risk-reading-item'><strong>Θ Theta / jour</strong><b>{format_fr_signed(theta_value, 4)} €</b><br>Effet temporel quotidien, à paramètres de marché constants.</div>
-                <div class='risk-reading-item'><strong>ρ Rho</strong><b>{format_fr_signed(rho_value, 4)} €</b><br>Impact estimé pour une hausse de 1 point du taux sans risque.</div>
+                <div class='risk-reading-item'><strong>Θ Theta / jour</strong><b>{format_fr_signed(theta_value, 4)} {orm_currency_symbol}</b><br>Effet temporel quotidien, à paramètres de marché constants.</div>
+                <div class='risk-reading-item'><strong>ρ Rho</strong><b>{format_fr_signed(rho_value, 4)} {orm_currency_symbol}</b><br>Impact estimé pour une hausse de 1 point du taux sans risque.</div>
                 <div class='risk-reading-item'><strong>Γ Lecture Gamma</strong><b>{gamma_text}</b><br>Le Delta évolue lorsque le spot se déplace.</div>
-                <div class='risk-reading-item'><strong>ν Lecture Vega</strong><b>{vega_text}</b><br>{format_fr_signed(vega_value, 4)} € pour +1 point de volatilité.</div>
+                <div class='risk-reading-item'><strong>ν Lecture Vega</strong><b>{vega_text}</b><br>{format_fr_signed(vega_value, 4)} {orm_currency_symbol} pour +1 point de volatilité.</div>
             </div>
             <div class='risk-conclusion'>
                 <strong>Lecture de la position</strong>
@@ -2353,12 +2531,12 @@ if mode == "Position individuelle":
             spot = S0 * (1 + shock)
             state = option_position(spot, K, T, r, sigma, option_type, position_type, quantity)
             pnl = state["position_value"] - position_initiale["position_value"]
-            v11_rows.append({"Choc spot": f"{shock:+.0%}", "Spot (€)": spot,
+            v11_rows.append({"Choc spot": f"{shock:+.0%}", f"Spot ({orm_currency_symbol})": spot,
                              "Delta (actions)": state["position_delta"],
                              "Couverture cible (actions)": state["hedge_shares"],
                              "Rééquilibrage (actions)": state["hedge_shares"] - hedge_initial,
-                             "P&L option (€)": pnl,
-                             "P&L avec hedge initial (€)": pnl + hedge_initial * (spot - S0)})
+                             f"P&L option ({orm_currency_symbol})": pnl,
+                             f"P&L avec hedge initial ({orm_currency_symbol})": pnl + hedge_initial * (spot - S0)})
         render_v11_ladder(v11_rows, "v11_single_ladder_csv")
 
 # ============================================================
@@ -2366,6 +2544,27 @@ if mode == "Position individuelle":
 # ============================================================
 
 elif mode == "Portefeuille multi-options":
+    orm_currency = st.session_state.get("orm_import_currency", "EUR")
+    if orm_currency not in ("EUR", "USD"):
+        orm_currency = "EUR"
+    orm_currency = st.selectbox(
+        "Devise des montants (sans conversion de change)",
+        ["EUR", "USD"],
+        index=0 if orm_currency == "EUR" else 1,
+        key="orm_currency_select_1",
+        help="La devise est une unité d'affichage ; aucun taux de change n'est appliqué.",
+    )
+    st.session_state["orm_import_currency"] = orm_currency
+    orm_currency_symbol = "€" if orm_currency == "EUR" else "$"
+    _import_v126 = st.session_state.get("orm_v126_import")
+    if _import_v126 and _import_v126.get("destination") == "Portefeuille multi-options":
+        st.info(f"Données importées : {_import_v126['name']} ({_import_v126['ticker']}) · "
+                f"{_import_v126['date']} · {_import_v126['currency']} · "
+                f"Spot {_import_v126['spot']:.2f} · σ historique {_import_v126['volatility']:.2f} %. "
+                "Les autres paramètres restent manuels. Les données ne sont pas synchronisées automatiquement.")
+
+        st.caption("Les strikes des lignes restent manuels. Pour une analyse proche de la monnaie, ajustez chaque strike au spot affiché.")
+
 
     st.header(
         "Portefeuille multi-options"
@@ -2393,7 +2592,7 @@ elif mode == "Portefeuille multi-options":
         st.session_state.setdefault(_key, _default)
 
     portfolio_S0 = st.sidebar.number_input(
-        "Spot commun S₀ (€)",
+        f"Spot commun S₀ ({orm_currency_symbol})",
         step=1.0,
         key="portfolio_spot"
     )
@@ -2449,7 +2648,7 @@ elif mode == "Portefeuille multi-options":
     portfolio_spot_max = 1.40 * portfolio_S0
 
     st.markdown(
-        f"<div class='scenario-strip'><div class='scenario-item'>Spot initial<b>{format_fr(portfolio_S0)} €</b></div><div class='scenario-item'>Plage de simulation<b>{format_fr(portfolio_spot_min)} € → {format_fr(portfolio_spot_max)} €</b></div><div class='scenario-item'>Positions<b>{number_positions}</b></div></div>",
+        f"<div class='scenario-strip'><div class='scenario-item'>Spot initial<b>{format_fr(portfolio_S0)} {orm_currency_symbol}</b></div><div class='scenario-item'>Plage de simulation<b>{format_fr(portfolio_spot_min)} {orm_currency_symbol} → {format_fr(portfolio_spot_max)} {orm_currency_symbol}</b></div><div class='scenario-item'>Positions<b>{number_positions}</b></div></div>",
         unsafe_allow_html=True
     )
 
@@ -2475,7 +2674,7 @@ elif mode == "Portefeuille multi-options":
                 st.session_state["portfolio_simulated_spot"] = float(min(portfolio_spot_max, max(portfolio_spot_min, float(st.session_state["portfolio_simulated_spot"]) * (1 + shock))))
 
     portfolio_S1 = st.slider(
-        "Spot simulé du portefeuille S₁ (€)",
+        f"Spot simulé du portefeuille S₁ ({orm_currency_symbol})",
         min_value=float(portfolio_spot_min),
         max_value=float(portfolio_spot_max),
         step=float(max(portfolio_S0 / 200, 0.01)),
@@ -2576,7 +2775,7 @@ elif mode == "Portefeuille multi-options":
                     )
 
                     strike = st.number_input(
-                        "Strike K (€)",
+                        f"Strike K ({orm_currency_symbol})",
                         step=1.0,
                         key=f"portfolio_K_{i}"
                     )
@@ -2798,7 +2997,7 @@ elif mode == "Portefeuille multi-options":
             ("Valeur", "Delta", "Gamma", "Couverture cible"),
             (live_value, live_delta, live_gamma, live_hedge),
             (total_value, total_delta, total_gamma, portfolio_hedge),
-            (" €", " actions", " actions/€", " actions"),
+            (f" {orm_currency_symbol}", " actions", f" actions/{orm_currency_symbol}", " actions"),
             (2, 4, 4, 2)):
             col.metric(title, f"{format_fr(current, digits)}{unit}",
                        delta=f"à S₀ : {format_fr(base, digits)}{unit}", delta_color="off")
@@ -2815,7 +3014,7 @@ elif mode == "Portefeuille multi-options":
         )
 
         p1, p2, p3 = st.columns(3)
-        p1.metric("Valeur portefeuille", f"{format_fr(total_value)} €")
+        p1.metric("Valeur portefeuille", f"{format_fr(total_value)} {orm_currency_symbol}")
         p2.metric("Δ  Delta portefeuille", format_fr(total_delta, 4))
         p3.metric("Γ  Gamma portefeuille", format_fr(total_gamma, 4))
 
@@ -2842,9 +3041,9 @@ elif mode == "Portefeuille multi-options":
             )
 
         p4, p5, p6 = st.columns(3)
-        p4.metric("ν  Vega (+1 pt de vol.)", f"{format_fr(total_vega, 4)} €")
-        p5.metric("Θ  Theta / jour", f"{format_fr(total_theta, 4)} €")
-        p6.metric("ρ  Rho (+1 pt de taux)", f"{format_fr(total_rho, 4)} €")
+        p4.metric("ν  Vega (+1 pt de vol.)", f"{format_fr(total_vega, 4)} {orm_currency_symbol}")
+        p5.metric("Θ  Theta / jour", f"{format_fr(total_theta, 4)} {orm_currency_symbol}")
+        p6.metric("ρ  Rho (+1 pt de taux)", f"{format_fr(total_rho, 4)} {orm_currency_symbol}")
 
 
         # --------------------------------------------------------
@@ -2897,7 +3096,7 @@ elif mode == "Portefeuille multi-options":
         for column, greek, unit, pop_title, explanation in (
             (contribution_col1, "Delta", "actions", "ⓘ Lire les contributions au Delta",
              "Chaque barre est le Delta signé d'une option. Leur somme est le Delta agrégé du portefeuille."),
-            (contribution_col2, "Gamma", "actions/€", "ⓘ Lire les contributions au Gamma",
+            (contribution_col2, "Gamma", f"actions/{orm_currency_symbol}", "ⓘ Lire les contributions au Gamma",
              "Chaque barre est le Gamma signé d'une option. Les expositions de signes opposés peuvent se compenser."),
         ):
             with column:
@@ -3001,9 +3200,9 @@ elif mode == "Portefeuille multi-options":
 
         ps1.metric(
             "Spot simulé",
-            f"{format_fr(portfolio_S1)} €",
+            f"{format_fr(portfolio_S1)} {orm_currency_symbol}",
             delta=(
-                f"{format_fr_signed(portfolio_S1 - portfolio_S0, 2)} €"
+                f"{format_fr_signed(portfolio_S1 - portfolio_S0, 2)} {orm_currency_symbol}"
             )
         )
 
@@ -3085,7 +3284,7 @@ elif mode == "Portefeuille multi-options":
         if True:
             action = "acheter" if simulated_hedge > 0 else "vendre" if simulated_hedge < 0 else "ne détenir aucune"
             explain_graph("Hedge agrégé",
-                          f"À S₁ = {format_fr(portfolio_S1, 2)} €, la couverture agrégée vaut {format_fr(simulated_hedge, 2)} action(s). Les Delta des lignes se compensent ou s'additionnent.",
+                          f"À S₁ = {format_fr(portfolio_S1, 2)} {orm_currency_symbol}, la couverture agrégée vaut {format_fr(simulated_hedge, 2)} action(s). Les Delta des lignes se compensent ou s'additionnent.",
                           f"Décision : {action} {format_fr(abs(simulated_hedge), 2)} action(s). Une couverture Delta-neutre ne supprime pas le Gamma ni le Vega du portefeuille.")
         st.subheader("Gamma agrégé en fonction du spot")
         st.plotly_chart(interactive_risk_chart(portfolio_scenario_df, "Gamma",
@@ -3093,15 +3292,15 @@ elif mode == "Portefeuille multi-options":
                         width="stretch", key="portfolio_gamma_plotly")
         if True:
             explain_graph("Gamma du portefeuille",
-                          f"Le Gamma agrégé est {format_fr(simulated_gamma, 4)} actions/€ au spot simulé. Il correspond à la somme signée des Gamma des options.",
+                          f"Le Gamma agrégé est {format_fr(simulated_gamma, 4)} actions/{orm_currency_symbol} au spot simulé. Il correspond à la somme signée des Gamma des options.",
                           "Plus |Gamma| est grand, plus le nombre d'actions de couverture est sensible aux mouvements du spot. Les zones orange indiquent une sensibilité relativement élevée sur la plage étudiée.")
 
         st.markdown("#### Explorer les Greeks du portefeuille")
         with st.popover("ⓘ Comment lire les Greeks agrégés ?"):
-            st.write("L'axe horizontal indique le spot (€), l'axe vertical le Greek agrégé dans son unité. Chaque exposition est la somme signée des options du portefeuille. Le trait pointillé orange représente le spot simulé. Une compensation entre lignes peut disparaître lorsque le spot varie.")
+            st.write(f"L'axe horizontal indique le spot ({orm_currency_symbol}), l'axe vertical le Greek agrégé dans son unité. Chaque exposition est la somme signée des options du portefeuille. Le trait pointillé orange représente le spot simulé. Une compensation entre lignes peut disparaître lorsque le spot varie.")
         port_greek = st.selectbox("Greek du portefeuille", ["Delta", "Gamma", "Vega", "Theta"], key="portfolio_greek_selector_v931")
-        port_greek_keys = {"Delta": ("position_delta", "actions"), "Gamma": ("position_gamma", "actions/€"),
-                           "Vega": ("position_vega", "€/point de vol."), "Theta": ("position_theta_annual", "€/an")}
+        port_greek_keys = {"Delta": ("position_delta", "actions"), "Gamma": ("position_gamma", f"actions/{orm_currency_symbol}"),
+                           "Vega": ("position_vega", f"{orm_currency_symbol}/point de vol."), "Theta": ("position_theta_annual", f"{orm_currency_symbol}/an")}
         port_key, port_unit = port_greek_keys[port_greek]
         port_spots = np.linspace(0.6*portfolio_S0, 1.4*portfolio_S0, 101)
         port_values = []
@@ -3118,7 +3317,7 @@ elif mode == "Portefeuille multi-options":
         selected_zone = st.selectbox(
             "Afficher les zones ITM / ATM / OTM de",
             options=["Aucune zone"] + [
-                f"Option {i+1} · {opt[0]} · K = {format_fr(opt[3], 2)} €"
+                f"Option {i+1} · {opt[0]} · K = {format_fr(opt[3], 2)} {orm_currency_symbol}"
                 for i, opt in enumerate(options_key)
             ],
             index=1 if options_key else 0,
@@ -3126,7 +3325,7 @@ elif mode == "Portefeuille multi-options":
         )
         if selected_zone != "Aucune zone":
             selected_idx = [
-                f"Option {i+1} · {opt[0]} · K = {format_fr(opt[3], 2)} €"
+                f"Option {i+1} · {opt[0]} · K = {format_fr(opt[3], 2)} {orm_currency_symbol}"
                 for i, opt in enumerate(options_key)
             ].index(selected_zone)
             chosen = options_key[selected_idx]
@@ -3137,12 +3336,12 @@ elif mode == "Portefeuille multi-options":
             st.caption("Aucune zone ITM/OTM affichée : chaque option possède sa propre moneyness.")
         fig_port_greek.add_vline(x=portfolio_S1, line_dash="dash", line_color="#ea580c", line_width=2.5)
         fig_port_greek.add_annotation(x=portfolio_S1, y=-0.075, yref="paper", showarrow=False,
-                                      text=f"<b>Spot simulé : {format_fr(portfolio_S1, 2)} €</b>",
+                                      text=f"<b>Spot simulé : {format_fr(portfolio_S1, 2)} {orm_currency_symbol}</b>",
                                       bgcolor="rgba(255,237,213,0.98)", borderpad=7,
                                       font=dict(size=12, color="#c2410c"))
         if selected_zone != "Aucune zone":
             moneyness_context(chosen[0], chosen[3], portfolio_S1, selected_idx + 1)
-        fig_port_greek.update_layout(title=dict(text=f"{port_greek} du portefeuille", font=dict(size=19)), template="plotly_white", height=560, xaxis_title="Spot (€)",
+        fig_port_greek.update_layout(title=dict(text=f"{port_greek} du portefeuille", font=dict(size=19)), template="plotly_white", height=560, xaxis_title=f"Spot ({orm_currency_symbol})",
                                      yaxis_title=f"{port_greek} ({port_unit})", margin=dict(l=55,r=35,t=65,b=100),
                                      legend=dict(orientation="h", y=-0.24, x=0))
         st.plotly_chart(fig_port_greek, width="stretch", key="portfolio_greek_plot_v931")
@@ -3211,17 +3410,17 @@ elif mode == "Portefeuille multi-options":
 
         pp1.metric(
             "P&L options",
-            f"{format_fr(portfolio_option_pnl, 2)} €"
+            f"{format_fr(portfolio_option_pnl, 2)} {orm_currency_symbol}"
         )
 
         pp2.metric(
             "P&L couverture actions",
-            f"{format_fr(portfolio_stock_pnl, 2)} €"
+            f"{format_fr(portfolio_stock_pnl, 2)} {orm_currency_symbol}"
         )
 
         pp3.metric(
             "P&L portefeuille couvert",
-            f"{format_fr(portfolio_hedged_pnl, 2)} €"
+            f"{format_fr(portfolio_hedged_pnl, 2)} {orm_currency_symbol}"
         )
 
         pa1, pa2, pa3 = (
@@ -3230,17 +3429,17 @@ elif mode == "Portefeuille multi-options":
 
         pa1.metric(
             "P&L exact",
-            f"{format_fr(portfolio_option_pnl, 2)} €"
+            f"{format_fr(portfolio_option_pnl, 2)} {orm_currency_symbol}"
         )
 
         pa2.metric(
             "Approximation Delta",
-            f"{format_fr(portfolio_delta_approx, 2)} €"
+            f"{format_fr(portfolio_delta_approx, 2)} {orm_currency_symbol}"
         )
 
         pa3.metric(
             "Approximation Delta-Gamma",
-            f"{format_fr(portfolio_delta_gamma_approx, 2)} €"
+            f"{format_fr(portfolio_delta_gamma_approx, 2)} {orm_currency_symbol}"
         )
 
         st.markdown("#### Comparaison des méthodes de P&L")
@@ -3277,6 +3476,26 @@ elif mode == "Portefeuille multi-options":
         )
 
 
+        # V12.3 — risque agrégé et couverture statique au spot initial.
+        render_risk_diagnostic(
+            spot0=portfolio_S0,
+            spot1=portfolio_S1,
+            delta0=total_delta,
+            delta1=simulated_delta,
+            gamma0=total_gamma,
+            hedge0=portfolio_hedge,
+            key="v123_portfolio_risk",
+        )
+        render_static_pnl_comparison(
+            spots=error_spots_port,
+            option_pnl=exact_spot_only_port,
+            spot0=portfolio_S0,
+            current_spot=portfolio_S1,
+            hedge0=portfolio_hedge,
+            key="v123_portfolio_static",
+        )
+
+
     with portfolio_tab_stress:
         st.header("Stress tests du portefeuille")
         st.caption("Revalorisation de toutes les options à maturité de référence constante. "
@@ -3289,16 +3508,16 @@ elif mode == "Portefeuille multi-options":
         current_pnl = portfolio_option_pnl if stress_mode == "P&L options" else portfolio_hedged_pnl
         min_idx = np.unravel_index(np.argmin(stress_z), stress_z.shape)
         left_stress, right_stress = st.columns(2)
-        left_stress.metric("P&L du scénario courant", format_fr(current_pnl) + " €")
-        right_stress.metric("P&L minimal sur la grille", format_fr(np.min(stress_z)) + " €")
-        st.caption(f"Minimum simulé : spot {format_fr(stress_spots[min_idx[1]])} € ; "
+        left_stress.metric("P&L du scénario courant", format_fr(current_pnl) + f" {orm_currency_symbol}")
+        right_stress.metric("P&L minimal sur la grille", format_fr(np.min(stress_z)) + f" {orm_currency_symbol}")
+        st.caption(f"Minimum simulé : spot {format_fr(stress_spots[min_idx[1]])} {orm_currency_symbol} ; "
                    f"choc de volatilité {format_fr(stress_vol_shifts[min_idx[0]], 1)} point(s).")
         st.caption("La sélection agit sur la carte de chaleur et les indicateurs. "
                    "Les deux courbes de sensibilité restent visibles pour comparaison.")
         fig_multi_heat = go.Figure(go.Heatmap(
             x=stress_spots, y=stress_vol_shifts, z=stress_z,
-            colorscale="RdYlGn", zmid=0, colorbar=dict(title="P&L (€)"),
-            hovertemplate="Spot : %{x:.2f} €<br>Choc vol. : %{y:+.1f} pt(s)<br>P&L : %{z:,.2f} €<extra></extra>"))
+            colorscale="RdYlGn", zmid=0, colorbar=dict(title=f"P&L ({orm_currency_symbol})"),
+            hovertemplate=("Spot : %{x:.2f} €<br>Choc vol. : %{y:+.1f} pt(s)<br>P&L : %{z:,.2f} €<extra></extra>".replace("€", orm_currency_symbol))))
         # Marque le scénario sélectionné, même s'il se situe hors de la grille de stress.
         if (stress_spots.min() <= portfolio_S1 <= stress_spots.max() and
                 stress_vol_shifts.min() <= portfolio_vol_shift <= stress_vol_shifts.max()):
@@ -3315,7 +3534,7 @@ elif mode == "Portefeuille multi-options":
         fig_multi_heat.add_vline(x=portfolio_S0, line_dash="dash", line_color="#64748b")
         fig_multi_heat.add_hline(y=0, line_dash="dash", line_color="#64748b")
         fig_multi_heat.update_layout(template="plotly_white", height=440,
-                                     xaxis_title="Spot stressé (€)",
+                                     xaxis_title=f"Spot stressé ({orm_currency_symbol})",
                                      yaxis_title="Choc de volatilité commun (points de %)",
                                      margin=dict(l=55, r=35, t=35, b=55))
         st.plotly_chart(fig_multi_heat, width="stretch", key="portfolio_stress_heatmap_v913")
@@ -3341,7 +3560,7 @@ elif mode == "Portefeuille multi-options":
                                           line=dict(color="#16a34a", width=3)))
             fig_spot.add_hline(y=0, line_color="#94a3b8", line_width=1)
             fig_spot.update_layout(template="plotly_white", height=350,
-                                   xaxis_title="Spot (€)", yaxis_title="P&L (€)",
+                                   xaxis_title=f"Spot ({orm_currency_symbol})", yaxis_title=f"P&L ({orm_currency_symbol})",
                                    legend=dict(orientation="h", y=-0.28),
                                    margin=dict(l=35,r=20,t=25,b=80))
             st.plotly_chart(fig_spot, width="stretch", key="portfolio_stress_spot_v913")
@@ -3358,7 +3577,7 @@ elif mode == "Portefeuille multi-options":
                                            line=dict(color="#2563eb", width=3)))
             fig_vol.add_hline(y=0, line_color="#94a3b8", line_width=1)
             fig_vol.update_layout(template="plotly_white", height=350,
-                                   xaxis_title="Choc de volatilité (points de %)", yaxis_title="P&L (€)",
+                                   xaxis_title="Choc de volatilité (points de %)", yaxis_title=f"P&L ({orm_currency_symbol})",
                                    margin=dict(l=35,r=20,t=25,b=60))
             st.plotly_chart(fig_vol, width="stretch", key="portfolio_stress_vol_v913")
         st.caption("Les stress tests sont des scénarios illustratifs, pas des prévisions ni une mesure de VaR.")
@@ -3407,8 +3626,8 @@ elif mode == "Portefeuille multi-options":
         portfolio_residual = -simulated_hedge + portfolio_hedge
         pc1, pc2, pc3 = st.columns(3)
         pc1.metric("Delta résiduel après choc", format_fr(portfolio_residual, 4) + " actions")
-        pc2.metric("Gamma initial agrégé", format_fr(total_gamma, 4) + " actions/€")
-        pc3.metric("Spot du scénario", format_fr(portfolio_S1, 2) + " €")
+        pc2.metric("Gamma initial agrégé", format_fr(total_gamma, 4) + f" actions/{orm_currency_symbol}")
+        pc3.metric("Spot du scénario", format_fr(portfolio_S1, 2) + f" {orm_currency_symbol}")
         with st.popover("ⓘ Comment lire le diagnostic portefeuille ?"):
             st.write("La couverture globale neutralise la somme des Delta initiaux. "
                      "Si le marché évolue, la somme des Delta des options change : "
@@ -3435,13 +3654,13 @@ elif mode == "Portefeuille multi-options":
             <div class='risk-hero'>
                 <div class='risk-hero-kicker'>Risk Summary · Portefeuille</div>
                 <div class='risk-hero-title'>{number_positions} POSITIONS · RISQUE AGRÉGÉ</div>
-                <div class='risk-hero-sub'>Synthèse de l’exposition et décision de couverture · S₀ {format_fr(portfolio_S0, 2)} € · Valeur {format_fr(total_value, 2)} € · r {format_fr(portfolio_r_percent, 2)} %</div>
+                <div class='risk-hero-sub'>Synthèse de l’exposition et décision de couverture · S₀ {format_fr(portfolio_S0, 2)} {orm_currency_symbol} · Valeur {format_fr(total_value, 2)} {orm_currency_symbol} · r {format_fr(portfolio_r_percent, 2)} %</div>
             </div>
             <div class='summary-shell'>
                 <div class='summary-grid'>
                     <div class='summary-kpi'><div class='summary-kpi-label'>Δ Delta agrégé</div><div class='summary-kpi-value'>{format_fr_signed(total_delta, 4)}</div><div class='summary-kpi-note'>{portfolio_delta_text}</div></div>
                     <div class='summary-kpi'><div class='summary-kpi-label'>Γ Gamma agrégé</div><div class='summary-kpi-value'>{format_fr_signed(total_gamma, 4)}</div><div class='summary-kpi-note'>{portfolio_gamma_text}</div></div>
-                    <div class='summary-kpi'><div class='summary-kpi-label'>ν Vega agrégé</div><div class='summary-kpi-value'>{format_fr_signed(total_vega, 4)} €</div><div class='summary-kpi-note'>{portfolio_vega_text}</div></div>
+                    <div class='summary-kpi'><div class='summary-kpi-label'>ν Vega agrégé</div><div class='summary-kpi-value'>{format_fr_signed(total_vega, 4)} {orm_currency_symbol}</div><div class='summary-kpi-note'>{portfolio_vega_text}</div></div>
                 </div>
             </div>""", unsafe_allow_html=True)
 
@@ -3476,10 +3695,10 @@ elif mode == "Portefeuille multi-options":
             </div>
             <div class='risk-secondary-title'>Risques secondaires</div>
             <div class='risk-reading'>
-                <div class='risk-reading-item'><strong>Θ Theta / jour</strong><b>{format_fr_signed(total_theta, 4)} €</b><br>Effet temporel quotidien agrégé.</div>
-                <div class='risk-reading-item'><strong>ρ Rho agrégé</strong><b>{format_fr_signed(total_rho, 4)} €</b><br>Impact pour une hausse de 1 point du taux sans risque.</div>
+                <div class='risk-reading-item'><strong>Θ Theta / jour</strong><b>{format_fr_signed(total_theta, 4)} {orm_currency_symbol}</b><br>Effet temporel quotidien agrégé.</div>
+                <div class='risk-reading-item'><strong>ρ Rho agrégé</strong><b>{format_fr_signed(total_rho, 4)} {orm_currency_symbol}</b><br>Impact pour une hausse de 1 point du taux sans risque.</div>
                 <div class='risk-reading-item'><strong>Γ Lecture Gamma</strong><b>{portfolio_gamma_text}</b><br>La couverture Delta évoluera lorsque le spot se déplace.</div>
-                <div class='risk-reading-item'><strong>ν Lecture Vega</strong><b>{portfolio_vega_text}</b><br>{format_fr_signed(total_vega, 4)} € pour +1 point de volatilité.</div>
+                <div class='risk-reading-item'><strong>ν Lecture Vega</strong><b>{portfolio_vega_text}</b><br>{format_fr_signed(total_vega, 4)} {orm_currency_symbol} pour +1 point de volatilité.</div>
             </div>
             <div class='risk-conclusion'>
                 <strong>Lecture du portefeuille</strong>
@@ -3540,33 +3759,59 @@ elif mode == "Portefeuille multi-options":
             delta = sum(x["position_delta"] for x in positions)
             hedge = -delta
             pnl = value - total_value
-            v11_rows.append({"Choc spot": f"{shock:+.0%}", "Spot (€)": spot,
+            v11_rows.append({"Choc spot": f"{shock:+.0%}", f"Spot ({orm_currency_symbol})": spot,
                              "Delta (actions)": delta,
                              "Couverture cible (actions)": hedge,
                              "Rééquilibrage (actions)": hedge - portfolio_hedge,
-                             "P&L option (€)": pnl,
-                             "P&L avec hedge initial (€)": pnl + portfolio_hedge * (spot - portfolio_S0)})
+                             f"P&L option ({orm_currency_symbol})": pnl,
+                             f"P&L avec hedge initial ({orm_currency_symbol})": pnl + portfolio_hedge * (spot - portfolio_S0)})
         render_v11_ladder(v11_rows, "v11_portfolio_ladder_csv")
 
 
 # ============================================================
 # MODE 3 — MONTE-CARLO ET COUVERTURE DELTA DYNAMIQUE
 # ============================================================
-else:
+elif mode == "Monte-Carlo & couverture dynamique":
+    orm_currency = st.session_state.get("orm_import_currency", "EUR")
+    if orm_currency not in ("EUR", "USD"):
+        orm_currency = "EUR"
+    orm_currency = st.selectbox(
+        "Devise des montants (sans conversion de change)",
+        ["EUR", "USD"],
+        index=0 if orm_currency == "EUR" else 1,
+        key="orm_currency_select_2",
+        help="La devise est une unité d'affichage ; aucun taux de change n'est appliqué.",
+    )
+    st.session_state["orm_import_currency"] = orm_currency
+    orm_currency_symbol = "€" if orm_currency == "EUR" else "$"
+    _import_v126 = st.session_state.get("orm_v126_import")
+    if _import_v126 and _import_v126.get("destination") == "Monte-Carlo & couverture dynamique":
+        st.info(f"Données importées : {_import_v126['name']} ({_import_v126['ticker']}) · "
+                f"{_import_v126['date']} · {_import_v126['currency']} · "
+                f"Spot {_import_v126['spot']:.2f} · σ historique {_import_v126['volatility']:.2f} %. "
+                "Les autres paramètres restent manuels. Les données ne sont pas synchronisées automatiquement.")
+
+        st.caption("Strike conservé après importation : vous pouvez le rapprocher du spot si vous le souhaitez.")
+        st.button("Proposer un strike proche du spot importé", key="orm_strike_suggestion_2",
+                  on_click=lambda: st.session_state.__setitem__("mc_strike",
+                      float(round(st.session_state["orm_v126_import"]["spot"], 2))))
+
     st.subheader("Monte-Carlo & couverture Delta dynamique")
     st.caption("Option européenne **vendue** (Short Call ou Short Put), multiplicateur 1, sans dividendes. "
                "Couverture en actions fractionnaires, compte de trésorerie rémunéré au taux continu r.")
     with st.expander("Hypothèses et lecture du P&L", expanded=False):
         st.markdown("""Le sous-jacent suit un mouvement brownien géométrique. Par défaut, la dérive de simulation est égale au taux sans risque (mesure risque-neutre). Le prix initial de l'option est celui de Black-Scholes. La prime reçue finance l'achat initial d'actions, le solde étant placé ou emprunté au taux sans risque. Les transactions coûtent un pourcentage du notionnel échangé, y compris à l'ouverture et à la liquidation finale. Le P&L final est exprimé en euros **après** règlement du payoff de l'option et liquidation des actions. Il ne s'agit ni d'un rendement ni d'une garantie de résultat. La volatilité implicite de couverture est supposée égale à la volatilité simulée. Les graphiques de revalorisation de l'autre mode ne sont pas des simulations dynamiques.""")
+    st.session_state.setdefault("mc_spot", 100.0)
+    st.session_state.setdefault("mc_vol", 20.0)
     a,b,c,d = st.columns(4)
     with a:
-        mc_spot = st.number_input("Spot initial (€)", min_value=0.01, value=100.0, key="mc_spot")
-        mc_strike = st.number_input("Strike (€)", min_value=0.01, value=100.0, key="mc_strike")
+        mc_spot = st.number_input(f"Spot initial ({orm_currency_symbol})", min_value=0.01, key="mc_spot")
+        mc_strike = st.number_input(f"Strike ({orm_currency_symbol})", min_value=0.01, value=100.0, key="mc_strike")
         mc_type = st.selectbox("Option vendue", ["Call", "Put"], key="mc_type")
     with b:
         mc_maturity = st.number_input("Maturité (années)", min_value=0.01, max_value=10.0, value=0.5, step=0.05, key="mc_maturity")
         mc_rate = st.number_input("Taux sans risque (%)", value=3.0, step=0.25, key="mc_rate")
-        mc_vol = st.number_input("Volatilité (%)", min_value=0.01, max_value=300.0, value=20.0, step=1.0, key="mc_vol")
+        mc_vol = st.number_input("Volatilité (%)", min_value=0.01, max_value=300.0, step=1.0, key="mc_vol")
     with c:
         mc_qty = st.number_input("Quantité d'options vendues", min_value=1, max_value=100000, value=100, key="mc_qty")
         mc_paths = st.number_input("Nombre de trajectoires", min_value=100, max_value=10000, value=1000, step=100, key="mc_paths")
@@ -3602,12 +3847,12 @@ else:
             mc_prices, mc_results = _mc_cached(mc_config)
         mc_result = mc_results[int(mc_rebalance)]
         m1,m2,m3,m4,m5 = st.columns(5)
-        m1.metric("P&L moyen", f"{mc_result['mean_pnl']:,.2f} €")
-        m2.metric("Écart-type du P&L", f"{mc_result['std_pnl']:,.2f} €")
-        m3.metric("RMSE (écart à zéro)", f"{mc_result['rmse']:,.2f} €")
-        m4.metric("Quantile 5 %", f"{mc_result['p05']:,.2f} €")
-        m5.metric("Frais moyens", f"{np.mean(mc_result['trading_cost']):,.2f} €")
-        st.caption(f"Prime initiale reçue : {mc_result['premium_received']:,.2f} € · "
+        m1.metric("P&L moyen", f"{mc_result['mean_pnl']:,.2f} {orm_currency_symbol}")
+        m2.metric("Écart-type du P&L", f"{mc_result['std_pnl']:,.2f} {orm_currency_symbol}")
+        m3.metric("RMSE (écart à zéro)", f"{mc_result['rmse']:,.2f} {orm_currency_symbol}")
+        m4.metric("Quantile 5 %", f"{mc_result['p05']:,.2f} {orm_currency_symbol}")
+        m5.metric("Frais moyens", f"{np.mean(mc_result['trading_cost']):,.2f} {orm_currency_symbol}")
+        st.caption(f"Prime initiale reçue : {mc_result['premium_received']:,.2f} {orm_currency_symbol} · "
                    f"Actions détenues initialement : {mc_result['initial_shares']:,.4f} · "
                    "P&L net de frais et financement. Quantile 5 % = seuil sous lequel se trouvent 5 % des résultats simulés.")
         chart1,chart2=st.columns(2)
@@ -3618,7 +3863,7 @@ else:
             for i in range(min(25,mc_paths)):
                 fig.add_trace(go.Scatter(x=t,y=mc_prices[:,i],mode="lines",line=dict(width=1),
                                          opacity=0.55,showlegend=False))
-            fig.update_layout(xaxis_title="Temps (années)",yaxis_title="Spot (€)",height=390,
+            fig.update_layout(xaxis_title="Temps (années)",yaxis_title=f"Spot ({orm_currency_symbol})",height=390,
                               margin=dict(l=15,r=15,t=15,b=15))
             st.plotly_chart(fig, width="stretch")
         with chart2:
@@ -3626,7 +3871,7 @@ else:
             fig=go.Figure()
             fig.add_trace(go.Histogram(x=mc_result['pnl'],nbinsx=45,name="P&L final"))
             fig.add_vline(x=0,line_dash="dash",line_color="black")
-            fig.update_layout(xaxis_title="P&L final (€)",yaxis_title="Nombre de trajectoires",height=390,
+            fig.update_layout(xaxis_title=f"P&L final ({orm_currency_symbol})",yaxis_title="Nombre de trajectoires",height=390,
                               margin=dict(l=15,r=15,t=15,b=15))
             st.plotly_chart(fig,width="stretch")
         st.markdown("#### Suivi d’une couverture Delta sur une trajectoire")
@@ -3641,9 +3886,9 @@ else:
         if not np.isclose(mc_trace["final_pnl"], mc_result["pnl"][int(mc_path_index)-1], atol=1e-7, rtol=1e-10):
             st.error("Incohérence détectée entre le suivi de la trajectoire et le moteur Monte-Carlo.")
         else:
-            st.caption(f"Trajectoire n° {mc_path_index} : P&L final = {mc_trace['final_pnl']:,.2f} € · "
-                       f"Frais cumulés = {mc_trace['total_fees']:,.2f} € · "
-                       f"Spot final = {mc_trace['spot'][-1]:,.2f} €")
+            st.caption(f"Trajectoire n° {mc_path_index} : P&L final = {mc_trace['final_pnl']:,.2f} {orm_currency_symbol} · "
+                       f"Frais cumulés = {mc_trace['total_fees']:,.2f} {orm_currency_symbol} · "
+                       f"Spot final = {mc_trace['spot'][-1]:,.2f} {orm_currency_symbol}")
         left_trace, right_trace = st.columns(2)
         with left_trace:
             st.markdown("##### Évolution du Delta Black-Scholes")
@@ -3669,10 +3914,10 @@ else:
         st.markdown("#### Comparaison des fréquences de rééquilibrage")
         mc_rows=[]
         for f,res in sorted(mc_results.items()):
-            mc_rows.append({"Fréquence (pas)":f,"P&L moyen (€)":res['mean_pnl'],
-                            "Écart-type (€)":res['std_pnl'],"RMSE (€)":res['rmse'],
-                            "Quantile 5 % (€)":res['p05'],"Quantile 95 % (€)":res['p95'],
-                            "Frais moyens (€)":float(np.mean(res['trading_cost']))})
+            mc_rows.append({"Fréquence (pas)":f,f"P&L moyen ({orm_currency_symbol})":res['mean_pnl'],
+                            f"Écart-type ({orm_currency_symbol})":res['std_pnl'],f"RMSE ({orm_currency_symbol})":res['rmse'],
+                            f"Quantile 5 % ({orm_currency_symbol})":res['p05'],f"Quantile 95 % ({orm_currency_symbol})":res['p95'],
+                            f"Frais moyens ({orm_currency_symbol})":float(np.mean(res['trading_cost']))})
         mc_df=pd.DataFrame(mc_rows)
         st.dataframe(mc_df,hide_index=True,width="stretch")
         fig=go.Figure()
@@ -3682,9 +3927,9 @@ else:
         fig.add_trace(go.Bar(x=mc_labels,
                              y=[mc_results[f]['rmse'] for f in mc_frequencies],
                              name="RMSE du P&L",
-                             text=[f"{mc_results[f]['rmse']:.2f} €" for f in mc_frequencies],
+                             text=[f"{mc_results[f]['rmse']:.2f} {orm_currency_symbol}" for f in mc_frequencies],
                              textposition="outside", cliponaxis=False))
-        fig.update_layout(xaxis_title="Fréquence de rééquilibrage",yaxis_title="RMSE (€)",height=360,
+        fig.update_layout(xaxis_title="Fréquence de rééquilibrage",yaxis_title=f"RMSE ({orm_currency_symbol})",height=360,
                           xaxis=dict(type="category", categoryorder="array", categoryarray=mc_labels),
                           margin=dict(l=15,r=15,t=25,b=15))
         st.plotly_chart(fig,width="stretch")
@@ -3699,10 +3944,10 @@ else:
             customdata=[[res["mean_pnl"]] for res in mc_results.values()],
             mode="markers+text", textposition="top center",
             marker=dict(size=13, color="#2563eb"),
-            hovertemplate="%{text}<br>Frais moyens : %{x:.2f} €<br>RMSE : %{y:.2f} €<br>P&L moyen : %{customdata[0]:.2f} €<extra></extra>"
+            hovertemplate=("%{text}<br>Frais moyens : %{x:.2f} €<br>RMSE : %{y:.2f} €<br>P&L moyen : %{customdata[0]:.2f} €<extra></extra>".replace("€", orm_currency_symbol))
         ))
-        fig.update_layout(xaxis_title="Frais de transaction moyens (€)",
-                          yaxis_title="RMSE du P&L net (€)", height=360,
+        fig.update_layout(xaxis_title=f"Frais de transaction moyens ({orm_currency_symbol})",
+                          yaxis_title=f"RMSE du P&L net ({orm_currency_symbol})", height=360,
                           margin=dict(l=15,r=15,t=25,b=15))
         st.plotly_chart(fig, width="stretch")
         if mc_fee == 0:
@@ -3716,3 +3961,283 @@ else:
                 "mais augmenter les coûts lorsque les transactions sont facturées.")
     except (ValueError, OverflowError, FloatingPointError) as exc:
         st.error(f"Paramètres de simulation invalides : {exc}")
+
+
+# ============================================================
+# OPTION RISK MANAGER — DONNÉES RÉELLES V12.5
+# ============================================================
+
+elif mode == "Données réelles":
+    st.subheader("Données réelles de marché")
+    st.caption("Yahoo Finance via yfinance : données historiques potentiellement différées. Les valorisations Black-Scholes restent théoriques.")
+
+    try:
+        import yfinance as yf
+    except ImportError:
+        st.error("Bibliothèque manquante : installe yfinance avec `%pip install yfinance` dans JupyterLab, puis relance Streamlit.")
+        st.stop()
+
+    # Une entrée = (nom, ticker, zone, type, devise attendue).
+    # La devise affichée est indicative : elle doit être confirmée par la place de cotation.
+    ASSETS_V125 = [
+        ("Apple", "AAPL", "États-Unis", "Action", "USD"),
+        ("Microsoft", "MSFT", "États-Unis", "Action", "USD"),
+        ("NVIDIA", "NVDA", "États-Unis", "Action", "USD"),
+        ("Amazon", "AMZN", "États-Unis", "Action", "USD"),
+        ("Alphabet", "GOOGL", "États-Unis", "Action", "USD"),
+        ("Meta Platforms", "META", "États-Unis", "Action", "USD"),
+        ("Tesla", "TSLA", "États-Unis", "Action", "USD"),
+        ("Broadcom", "AVGO", "États-Unis", "Action", "USD"),
+        ("JPMorgan Chase", "JPM", "États-Unis", "Action", "USD"),
+        ("Visa", "V", "États-Unis", "Action", "USD"),
+        ("Walmart", "WMT", "États-Unis", "Action", "USD"),
+        ("Netflix", "NFLX", "États-Unis", "Action", "USD"),
+        ("Coca-Cola", "KO", "États-Unis", "Action", "USD"),
+        ("Berkshire Hathaway B", "BRK-B", "États-Unis", "Action", "USD"),
+        ("AMD", "AMD", "États-Unis", "Action", "USD"),
+        ("LVMH", "MC.PA", "France", "Action", "EUR"),
+        ("TotalEnergies", "TTE.PA", "France", "Action", "EUR"),
+        ("Air Liquide", "AI.PA", "France", "Action", "EUR"),
+        ("BNP Paribas", "BNP.PA", "France", "Action", "EUR"),
+        ("Thales", "HO.PA", "France", "Action", "EUR"),
+        ("Airbus", "AIR.PA", "France", "Action", "EUR"),
+        ("Schneider Electric", "SU.PA", "France", "Action", "EUR"),
+        ("Sanofi", "SAN.PA", "France", "Action", "EUR"),
+        ("L'Oréal", "OR.PA", "France", "Action", "EUR"),
+        ("Hermès", "RMS.PA", "France", "Action", "EUR"),
+        ("CAC 40", "^FCHI", "France", "Indice", "points"),
+        ("S&P 500", "^GSPC", "États-Unis", "Indice", "points"),
+        ("Nasdaq-100", "^NDX", "États-Unis", "Indice", "points"),
+    ]
+
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def market_history_v125(symbol, period):
+        frame = yf.download(symbol, period=period, interval="1d", auto_adjust=False,
+                            actions=False, progress=False, threads=False)
+        if frame is None or frame.empty:
+            raise ValueError("Aucune donnée historique reçue pour ce ticker.")
+        if isinstance(frame.columns, pd.MultiIndex):
+            # yf.download(ticker unique) : niveaux (champ, ticker), ou inverse selon version.
+            if symbol in frame.columns.get_level_values(-1):
+                frame = frame.xs(symbol, axis=1, level=-1)
+            elif symbol in frame.columns.get_level_values(0):
+                frame = frame.xs(symbol, axis=1, level=0)
+            elif len(set(frame.columns.get_level_values(-1))) == 1:
+                frame.columns = frame.columns.get_level_values(0)
+            elif len(set(frame.columns.get_level_values(0))) == 1:
+                frame.columns = frame.columns.get_level_values(-1)
+            else:
+                raise ValueError("Structure des colonnes Yahoo Finance non reconnue.")
+        if "Close" not in frame:
+            raise ValueError("La colonne Close n'est pas disponible.")
+        for name in ["Open", "High", "Low", "Close", "Adj Close", "Volume"]:
+            if name in frame:
+                frame[name] = pd.to_numeric(frame[name], errors="coerce")
+        frame = frame.replace([np.inf, -np.inf], np.nan)
+        frame = frame.dropna(subset=["Close"])
+        if len(frame) < 30:
+            raise ValueError("Moins de 30 séances : historique insuffisant.")
+        if (frame["Close"] <= 0).any():
+            raise ValueError("Cours non positifs dans l'historique.")
+        return frame
+
+    def market_vol_v125(adjusted):
+        ret = np.log(adjusted / adjusted.shift(1)).replace([np.inf, -np.inf], np.nan).dropna()
+        if len(ret) < 2:
+            raise ValueError("Rendements insuffisants pour calculer la volatilité.")
+        vol = float(ret.std(ddof=1) * np.sqrt(252))
+        if not np.isfinite(vol) or vol <= 0:
+            raise ValueError("Volatilité estimée nulle ou invalide.")
+        return ret, vol
+
+    left, mid, right = st.columns([1, 1, 1])
+    with left:
+        zone = st.selectbox("Zone géographique", ["Toutes", "France", "États-Unis"], key="real_v125_zone")
+    with mid:
+        category = st.selectbox("Type de sous-jacent", ["Tous", "Actions", "Indices"], key="real_v125_category")
+    with right:
+        search = st.text_input("Rechercher (nom ou ticker)", placeholder="Ex. NVIDIA, BNP, CAC 40...", key="real_v125_search")
+
+    candidates = [a for a in ASSETS_V125
+                  if (zone == "Toutes" or a[2] == zone)
+                  and (category == "Tous" or a[3] == ("Action" if category == "Actions" else "Indice"))
+                  and (search.strip().casefold() in (a[0] + " " + a[1]).casefold())]
+    if not candidates:
+        st.warning("Aucun sous-jacent ne correspond aux filtres. Modifie ta recherche.")
+        st.stop()
+    asset_labels = [f"{a[0]} — {a[1]}" for a in candidates]
+    chosen_label = st.selectbox("Sous-jacent", asset_labels, key="real_v125_asset")
+    selected = candidates[asset_labels.index(chosen_label)]
+    asset_name, ticker, market_zone, asset_type, currency = selected
+    period = st.selectbox("Période historique", ["3mo", "6mo", "1y", "2y", "5y", "10y"], index=3, key="real_v125_period")
+    st.caption(f"Ticker : {ticker} · {market_zone} · {asset_type} · Unité attendue : {currency} · Fréquence : quotidienne")
+
+    try:
+        with st.spinner("Chargement de l'historique Yahoo Finance..."):
+            history = market_history_v125(ticker, period)
+        raw_close = history["Close"].astype(float)
+        adjusted = (history["Adj Close"].astype(float)
+                    if "Adj Close" in history and history["Adj Close"].notna().sum() >= 30
+                    else raw_close.copy())
+        adjusted = adjusted.where(adjusted > 0).dropna()
+        log_returns, annual_volatility = market_vol_v125(adjusted)
+        spot_market = float(raw_close.iloc[-1])
+        last_date = pd.Timestamp(raw_close.index[-1]).strftime("%d/%m/%Y")
+        has_adjusted = "Adj Close" in history and history["Adj Close"].notna().sum() >= 30
+
+        st.markdown("### 1. Historique et qualité des données")
+        a, b, c, d = st.columns(4)
+        a.metric(f"Dernier cours brut ({currency})", f"{spot_market:,.2f}")
+        b.metric("Volatilité historique annualisée", f"{annual_volatility:.2%}")
+        c.metric("Séances disponibles", str(len(raw_close)))
+        d.metric("Dernière séance", last_date)
+        if not has_adjusted:
+            st.warning("Cours ajusté indisponible : volatilité calculée sur les cours bruts, ce qui peut inclure les effets des opérations sur titres.")
+        st.caption("Spot pour Black-Scholes : dernier Close brut. Rendements et volatilité : Adj Close lorsqu'il est disponible. Les valeurs ne sont pas des cotations en temps réel.")
+
+        if asset_type == "Action":
+            st.markdown("### Transférer ces données vers un autre module")
+            st.caption("Transfert volontaire du spot brut et de la volatilité historique. "
+                       "Les strikes, taux, maturités et quantités existants ne sont pas écrasés. "
+                       "Pour le portefeuille, la même volatilité est appliquée à chaque option. "
+                       "Les unités d'affichage sont sélectionnables dans les modes de destination. "
+                       "Aucune conversion de change n'est effectuée.")
+            _c1, _c2, _c3 = st.columns(3)
+            _transfer_args = (ticker, asset_name, currency, last_date, spot_market, annual_volatility)
+            with _c1:
+                st.button("Vers Position individuelle", key="orm_v126_to_single", width="stretch",
+                          on_click=transfer_market_inputs_v126,
+                          args=("Position individuelle", *_transfer_args))
+            with _c2:
+                st.button("Vers Portefeuille", key="orm_v126_to_portfolio", width="stretch",
+                          on_click=transfer_market_inputs_v126,
+                          args=("Portefeuille multi-options", *_transfer_args))
+            with _c3:
+                st.button("Vers Monte-Carlo", key="orm_v126_to_mc", width="stretch",
+                          on_click=transfer_market_inputs_v126,
+                          args=("Monte-Carlo & couverture dynamique", *_transfer_args))
+        else:
+            st.caption("Transfert désactivé pour les indices : niveaux exprimés en points et conventions différentes.")
+
+        chart_kind = st.radio("Affichage des cours", ["Courbe", "Chandeliers"], horizontal=True, key="real_v125_chart_kind")
+        show_ma20 = st.checkbox("Moyenne mobile 20 séances", value=True, key="real_v125_ma20")
+        show_ma50 = st.checkbox("Moyenne mobile 50 séances", value=True, key="real_v125_ma50")
+        fig = go.Figure()
+        candle_cols = all(x in history for x in ["Open", "High", "Low", "Close"])
+        if chart_kind == "Chandeliers" and candle_cols:
+            fig.add_trace(go.Candlestick(x=history.index, open=history["Open"], high=history["High"],
+                                         low=history["Low"], close=raw_close, name="OHLC"))
+        else:
+            if chart_kind == "Chandeliers":
+                st.info("OHLC incomplet : affichage de la courbe à la place.")
+            fig.add_trace(go.Scatter(x=raw_close.index, y=raw_close, mode="lines", name="Cours brut", line=dict(color="#2563eb", width=2)))
+        if show_ma20:
+            fig.add_trace(go.Scatter(x=raw_close.index, y=raw_close.rolling(20, min_periods=20).mean(),
+                                     name="MM20", line=dict(color="#d97706", width=2)))
+        if show_ma50:
+            fig.add_trace(go.Scatter(x=raw_close.index, y=raw_close.rolling(50, min_periods=50).mean(),
+                                     name="MM50", line=dict(color="#7c3aed", width=2)))
+        fig.update_layout(template="plotly_white", title=f"{asset_name} ({ticker})", height=460,
+                          xaxis_title="Date", yaxis_title=f"Cours ({currency})", xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, width="stretch", key="real_v125_price_chart")
+
+        if "Volume" in history and history["Volume"].notna().any() and (history["Volume"].fillna(0) > 0).any():
+            fig_volume = go.Figure(go.Bar(x=history.index, y=history["Volume"], marker_color="#64748b", name="Volume"))
+            fig_volume.update_layout(template="plotly_white", title="Volumes de transactions (données fournisseur)",
+                                     height=250, xaxis_title="Date", yaxis_title="Volume")
+            st.plotly_chart(fig_volume, width="stretch", key="real_v125_volumes")
+        else:
+            st.caption("Volumes absents ou non pertinents pour cet indice : graphique de volumes masqué.")
+
+        st.markdown("### 2. Rendements et volatilité glissante")
+        fig_ret = go.Figure(go.Histogram(x=log_returns * 100, nbinsx=40, marker_color="#64748b", name="Rendements"))
+        fig_ret.update_layout(template="plotly_white", title="Distribution des rendements logarithmiques quotidiens",
+                              xaxis_title="Rendement (%)", yaxis_title="Nombre de séances", height=320)
+        st.plotly_chart(fig_ret, width="stretch", key="real_v125_histogram")
+        fig_vol = go.Figure()
+        for window, color in [(20, "#2563eb"), (60, "#d97706"), (252, "#16a34a")]:
+            roll = log_returns.rolling(window=window, min_periods=window).std(ddof=1) * np.sqrt(252) * 100
+            if roll.notna().any():
+                fig_vol.add_trace(go.Scatter(x=roll.index, y=roll, mode="lines", name=f"{window} séances", line=dict(color=color, width=2)))
+            else:
+                st.caption(f"Volatilité {window} séances indisponible : historique trop court ({len(log_returns)} rendements).")
+        fig_vol.update_layout(template="plotly_white", title="Volatilité historique annualisée glissante",
+                              xaxis_title="Date", yaxis_title="Volatilité (%)", height=380)
+        st.plotly_chart(fig_vol, width="stretch", key="real_v125_rolling_vol")
+
+        st.markdown("### 3. Valorisation théorique Black-Scholes")
+        if asset_type == "Indice":
+            st.info("Les indices sont affichés pour l'analyse historique. La valorisation d'options est désactivée : le modèle actuel ne prend pas en compte le rendement de dividende ni les conventions propres aux options sur indice.")
+        else:
+            st.info("Le spot est le dernier cours brut et σ est une estimation historique, non une volatilité implicite. Le modèle actuel suppose un rendement de dividende nul.")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                real_type = st.selectbox("Type d'option", ["Call", "Put"], key="real_v125_option_type")
+                real_side = st.selectbox("Sens", ["Long", "Short"], key="real_v125_side")
+            with c2:
+                real_strike = st.number_input(f"Strike ({currency})", min_value=0.01,
+                                              value=float(max(0.01, round(spot_market, 2))), key=f"real_v125_strike_{ticker}")
+                real_maturity = st.number_input("Maturité (années)", min_value=0.001, value=0.5, key="real_v125_maturity")
+            with c3:
+                real_rate = st.number_input("Taux sans risque (%)", value=3.0, key="real_v125_rate")
+                real_quantity = st.number_input("Quantité d'options", min_value=1, value=100, step=1, key="real_v125_quantity")
+            real_result = option_position(S=spot_market, K=real_strike, T=real_maturity,
+                                          r=real_rate / 100, sigma=annual_volatility,
+                                          option_type=real_type.lower(), position_type=real_side.lower(), quantity=real_quantity)
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric(f"Prix unitaire ({currency})", f"{real_result['unit_price']:.4f}")
+            m2.metric(f"Valeur signée ({currency})", f"{real_result['position_value']:.2f}")
+            m3.metric("Delta (actions)", f"{real_result['position_delta']:.4f}")
+            m4.metric(f"Gamma (actions/{currency})", f"{real_result['position_gamma']:.6f}")
+            shares = float(real_result["hedge_shares"])
+            if shares > 1e-9:
+                st.success(f"Couverture Delta théorique : ACHETER {shares:.2f} actions.")
+            elif shares < -1e-9:
+                st.warning(f"Couverture Delta théorique : VENDRE {abs(shares):.2f} actions.")
+            else:
+                st.info("Position théoriquement Delta-neutre.")
+            scenarios = np.linspace(0.6 * spot_market, 1.4 * spot_market, 201)
+            dvals, gvals = [], []
+            for s in scenarios:
+                x = option_position(S=float(s), K=real_strike, T=real_maturity, r=real_rate / 100,
+                                    sigma=annual_volatility, option_type=real_type.lower(),
+                                    position_type=real_side.lower(), quantity=real_quantity)
+                dvals.append(x["position_delta"])
+                gvals.append(x["position_gamma"])
+            p1, p2 = st.columns(2)
+            for column, vals, title, color, graph_key in [
+                (p1, dvals, "Delta de position", "#2563eb", "real_v125_delta_chart"),
+                (p2, gvals, "Gamma de position", "#d97706", "real_v125_gamma_chart")
+            ]:
+                with column:
+                    fg = go.Figure(go.Scatter(x=scenarios, y=vals, mode="lines", line=dict(color=color, width=3)))
+                    fg.add_vline(x=spot_market, line_dash="dash", line_color="#64748b")
+                    fg.update_layout(template="plotly_white", title=title, xaxis_title=f"Spot ({currency})",
+                                     yaxis_title="Delta (actions)" if "Delta" in title else f"Gamma (actions/{currency})", height=390)
+                    st.plotly_chart(fg, width="stretch", key=graph_key)
+
+        with st.expander("Méthodologie et limites"):
+            st.markdown("""
+            **Source :** Yahoo Finance via `yfinance`. Les cours sont susceptibles d'être différés ou corrigés.
+
+            **Cours brut :** `Close` pour le spot et les chandeliers ; **cours ajusté :** `Adj Close` pour les rendements et la volatilité, lorsqu'il est fourni.
+
+            **Volatilité :** écart-type empirique (`ddof=1`) des rendements logarithmiques journaliers × √252. Les courbes glissantes utilisent 20, 60 ou 252 rendements.
+
+            **Moyennes mobiles :** calculées sur les cours bruts, en séances de marché. Les volumes peuvent manquer pour les indices.
+
+            **Black-Scholes :** modèle européen sans dividendes explicites, taux et volatilité constants ; la volatilité historique n'est pas une volatilité implicite. Les options américaines et les dividendes peuvent rendre le modèle inadéquat.
+
+            **Indices :** valeurs exprimées en points, non en unités monétaires ; leur valorisation en options n'est pas proposée ici.
+
+            **Références :** Black & Scholes (1973), *The Pricing of Options and Corporate Liabilities* ; Merton (1973), *Theory of Rational Option Pricing* ; [yfinance](https://github.com/ranaroussi/yfinance).
+
+            Outil pédagogique, pas une recommandation d'investissement.
+            """)
+        csv_frame = history.copy().reset_index()
+        st.download_button("Exporter l'historique CSV", data=csv_frame.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"{ticker.replace('^', '').replace('.', '_')}_historique.csv", mime="text/csv",
+                           key="real_v125_export")
+    except Exception as exc:
+        st.error(f"Impossible d'exploiter les données pour {ticker} : {type(exc).__name__} — {exc}")
+        st.info("Vérifie la connexion, le ticker, la période et la disponibilité de Yahoo Finance.")
