@@ -3006,6 +3006,12 @@ elif mode == "Portefeuille multi-options":
         live_delta = sum(o["position_delta"] for o in live_portfolio)
         live_gamma = sum(o["position_gamma"] for o in live_portfolio)
         live_hedge = -live_delta
+        # Indicateurs principaux visibles immédiatement dans la vue d'ensemble.
+        overview_value, overview_delta, overview_gamma = st.columns(3)
+        overview_value.metric("Valeur du portefeuille à S₀", f"{format_fr(total_value, 2)} {orm_currency_symbol}")
+        overview_delta.metric("Delta agrégé à S₀", f"{format_fr(total_delta, 4)} actions")
+        overview_gamma.metric("Gamma agrégé à S₀", f"{format_fr(total_gamma, 4)} actions/{orm_currency_symbol}")
+
         # Comparaison unique : situation initiale et scénario simulé.
         st.markdown(
             "<div class='section-kicker'>Portfolio risk</div>"
@@ -3027,7 +3033,12 @@ elif mode == "Portefeuille multi-options":
                 trade_instruction(live_hedge),
             ],
         })
-        st.dataframe(risk_comparison, hide_index=True, use_container_width=True)
+        # Mise en évidence de la ligne des positions de couverture cibles.
+        risk_styled = risk_comparison.style.apply(
+            lambda row: ["font-weight: bold" if row["Indicateur"] == "Actions à détenir pour être couvert" else "" for _ in row],
+            axis=1,
+        )
+        st.dataframe(risk_styled, hide_index=True, use_container_width=True)
         st.caption(
             "Chaque colonne indique la position totale de couverture Delta-neutre "
             "nécessaire à cet instant, et non un nouvel ordre à exécuter."
@@ -3221,63 +3232,30 @@ elif mode == "Portefeuille multi-options":
             - portfolio_hedge
         )
 
-        ps1, ps2, ps3, ps4 = (
-            st.columns(4)
-        )
+        # Trois indicateurs de même hauteur ; la couverture détaillée passe
+        # en pleine largeur dessous pour éviter une grande zone vide.
+        ps1, ps2, ps3 = st.columns(3)
 
         ps1.metric(
             "Spot simulé",
             f"{format_fr(portfolio_S1)} {orm_currency_symbol}",
-            delta=(
-                f"{format_fr_signed(portfolio_S1 - portfolio_S0, 2)} {orm_currency_symbol}"
-            )
+            delta=f"{format_fr_signed(portfolio_S1 - portfolio_S0, 2)} {orm_currency_symbol}",
         )
-
         ps2.metric(
             "Delta portefeuille",
             f"{format_fr(simulated_delta, 4)}",
-            delta=(
-                f"{format_fr_signed(simulated_delta - total_delta, 4)}"
-            )
+            delta=f"{format_fr_signed(simulated_delta - total_delta, 4)}",
         )
-
         ps3.metric(
             "Gamma portefeuille",
             f"{format_fr(simulated_gamma, 4)}",
-            delta=(
-                f"{format_fr_signed(simulated_gamma - total_gamma, 4)}"
-            )
+            delta=f"{format_fr_signed(simulated_gamma - total_gamma, 4)}",
         )
 
-        with ps4:
-            st.markdown(hedge_decomposition_html(portfolio_hedge, simulated_hedge, compact=True), unsafe_allow_html=True)
-
-
-        # --------------------------------------------------------
-        # RÉÉQUILIBRAGE DU PORTEFEUILLE
-        # --------------------------------------------------------
-
-        if hedge_rebalancing > 1e-12:
-
-            st.success(
-                f"Rééquilibrage : ACHETER "
-                f"{format_fr(abs(hedge_rebalancing))} actions."
-            )
-
-        elif hedge_rebalancing < -1e-12:
-
-            st.warning(
-                f"Rééquilibrage : VENDRE "
-                f"{format_fr(abs(hedge_rebalancing))} actions."
-            )
-
-        else:
-
-            st.info(
-                "Aucun rééquilibrage de la couverture "
-                "n'est nécessaire."
-            )
-
+        st.markdown(
+            hedge_decomposition_html(portfolio_hedge, simulated_hedge, compact=True),
+            unsafe_allow_html=True,
+        )
 
         # --------------------------------------------------------
         # COURBES AGRÉGÉES
