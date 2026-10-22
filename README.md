@@ -2,7 +2,7 @@
 
 **Application pédagogique de valorisation d'options européennes et de gestion du risque**, développée avec Python et Streamlit dans le cadre du Master 2 IREF — Finance quantitative et actuariat.
 
-**Version documentée : V12.8.10**
+**Version documentée : V12.8.11**
 
 [Ouvrir l'application Streamlit](https://option-risk-manager-flzg7r8c7zohf9obxia25c.streamlit.app/)
 
@@ -129,4 +129,4 @@ Python · Streamlit · NumPy · pandas · SciPy · Plotly · yfinance
 
 ---
 
-**Avertissement :** projet universitaire à vocation pédagogique. Les résultats sont indicatifs, reposent sur des hypothèses simplificatrices et ne constituent pas des conseils d'investissement.
+**Avertissement :** Les résultats sont indicatifs, reposent sur des hypothèses simplificatrices et ne constituent pas des conseils d'investissement.
