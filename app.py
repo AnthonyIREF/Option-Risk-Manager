@@ -1127,9 +1127,18 @@ PORTFOLIO_DEFAULTS = {
 }
 
 
+def clear_import_notice_for_mode(destination):
+    """Masque les informations d'import devenues obsolètes après remise à zéro."""
+    imported = st.session_state.get("orm_v126_import")
+    if isinstance(imported, dict) and imported.get("destination") == destination:
+        st.session_state.pop("orm_v126_import", None)
+        st.session_state.pop("orm_import_ticker", None)
+
+
 def reset_single_options():
     """Remise à zéro explicite des caractéristiques de l'option."""
     st.session_state.update(SINGLE_DEFAULTS)
+    clear_import_notice_for_mode("Position individuelle")
     reset_single_scenario()
     st.session_state["confirm_single_reset"] = False
 
@@ -1137,6 +1146,7 @@ def reset_single_options():
 def reset_portfolio_options():
     """Restaure les deux lignes initiales sans modifier le moteur financier."""
     st.session_state.update(PORTFOLIO_DEFAULTS)
+    clear_import_notice_for_mode("Portefeuille multi-options")
     for i in range(5):
         for name in ("type", "side", "qty", "K", "T", "sigma"):
             st.session_state.pop(f"portfolio_{name}_{i}", None)
@@ -1391,8 +1401,11 @@ def render_v11_chart(spots, pnl_today, pnl_expiry, reference_spot, current_spot,
 def render_v11_ladder(rows, key):
     df = pd.DataFrame(rows)
     display = df.copy()
-    for name in ("Spot (€)", "Delta (actions)", "Couverture cible (actions)", "Rééquilibrage (actions)", "P&L option (€)", "P&L avec hedge initial (€)"):
-        display[name] = display[name].map(lambda x: format_fr(x, 2))
+    # Les colonnes monétaires utilisent la devise active (EUR ou USD).
+    # Ne pas supposer que leur libellé contient toujours « € ».
+    for name in display.columns:
+        if name != "Choc spot" and pd.api.types.is_numeric_dtype(display[name]):
+            display[name] = display[name].map(lambda x: format_fr(x, 2))
     st.dataframe(display, width="stretch", hide_index=True, height=430)
     st.download_button("Télécharger le risk ladder (CSV)", data=df.to_csv(index=False, sep=";", decimal=",").encode("utf-8-sig"),
                        file_name="risk_ladder.csv", mime="text/csv", key=key)
@@ -1744,12 +1757,6 @@ if mode == "Position individuelle":
     hedge_new = position_S1["hedge_shares"]
     hedge_adjustment = clean_zero(hedge_new - hedge_initial)
     spot_change_pct = 100 * (S1 / S0 - 1)
-
-    st.caption(
-        f"Référence S₀ : {format_fr(S0)} {orm_currency_symbol} · Spot simulé S₁ : {format_fr(S1)} {orm_currency_symbol} "
-        f"({format_fr(spot_change_pct)} %) · Ajustement : "
-        f"{hedge_action(hedge_adjustment)} {format_fr(abs(hedge_adjustment))} actions"
-    )
 
     # Indicateurs natifs Streamlit : style V10.1 conservé, sans troncature des unités.
     st.markdown("#### Résultats actualisés à S₁")
