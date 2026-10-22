@@ -1,125 +1,131 @@
 # Option Risk Manager
 
-**Application pédagogique de valorisation d'options européennes et de gestion du risque**, développée avec Python et Streamlit dans le cadre du Master 2 IREF — Finance quantitative et actuariat.
+**Application interactive de valorisation d'options européennes et d'analyse du risque financier**, développée en Python avec Streamlit dans le cadre du **Master 2 IREF — Finance quantitative et actuariat**.
 
-**Version documentée : V12.8.11**
+**Projet réalisé par Anthony et Jason Rodriguez**  
+**Version : V12.8.11**
 
-[Ouvrir l'application Streamlit](https://option-risk-manager-flzg7r8c7zohf9obxia25c.streamlit.app/)
+**[Accéder directement à l'application Streamlit](https://option-risk-manager-flzg7r8c7zohf9obxia25c.streamlit.app/)** — aucune installation nécessaire pour la tester.
 
-## Objectif
+## Présentation du projet
 
-Option Risk Manager permet de valoriser des positions sur options européennes avec le modèle de **Black–Scholes**, de mesurer leurs sensibilités (*Greeks*) et d'étudier la **couverture Delta-neutre** lorsque le prix du sous-jacent varie.
+Option Risk Manager est un outil pédagogique qui permet de **valoriser des options européennes**, d'étudier les principales sensibilités de leur prix aux paramètres de marché (*Greeks*) et de comprendre les mécanismes de **couverture Delta-neutre**.
 
-L'application est destinée à l'apprentissage et à l'analyse de scénarios. **Elle ne transmet aucun ordre de bourse.**
+L'application permet de passer d'une position individuelle à un portefeuille de plusieurs options, puis d'analyser comment sa valeur et son exposition au risque évoluent lorsque le cours du sous-jacent, la volatilité ou le temps restant jusqu'à l'échéance changent.
+
+Elle associe ainsi **modélisation financière, visualisation interactive et analyse de scénarios**. Elle ne transmet aucun ordre de bourse.
 
 ## Fonctionnalités
 
-L'application propose quatre modes :
-
-| Mode | Fonctionnalités principales |
+| Module | Fonctionnalités principales |
 | --- | --- |
-| **Position individuelle** | Long Call, Short Call, Long Put, Short Put ; prix Black–Scholes, valeur de position, Delta, Gamma et autres Greeks ; couverture Delta, évolution du spot, P&L, stress tests, payoff et Risk Ladder. |
-| **Portefeuille multi-options** | Agrégation des positions, de leurs valeurs et de leurs sensibilités ; comparaison des risques et couvertures à S₀ et S₁ ; P&L et stress tests du portefeuille. |
-| **Monte-Carlo & couverture dynamique** | Simulation de trajectoires du sous-jacent et étude de la couverture Delta réajustée au cours du temps, avec analyse des résultats simulés. |
-| **Données réelles** | Catalogue de **300 actions** cotées en **EUR ou USD**, données historiques via Yahoo Finance (`yfinance`), cours et volatilité historique annualisée, graphiques et transfert de paramètres vers les modules de simulation. |
+| **Position individuelle** | Long Call, Short Call, Long Put et Short Put ; prix Black–Scholes, valeur de position, Delta, Gamma, Vega, Theta et Rho ; couverture Delta-neutre ; P&L, stress tests, payoff et Risk Ladder. |
+| **Portefeuille multi-options** | Construction d'un portefeuille sur un même sous-jacent ; agrégation des valeurs et des Greeks ; comparaison des risques à S₀ et S₁ ; couverture cible et rééquilibrage ; graphiques et stress tests. |
+| **Monte-Carlo et couverture dynamique** | Simulation de trajectoires du sous-jacent, réévaluation des options et étude d'une stratégie de couverture Delta réajustée au fil du temps. |
+| **Données réelles** | Catalogue de **300 actions** en EUR ou USD ; récupération des historiques via Yahoo Finance (`yfinance`), estimation de la volatilité historique et transfert des paramètres vers les modules d'analyse. |
 
-L'interface propose également des visualisations interactives et des exports CSV sur les vues concernées.
+Selon les modules, l'interface propose des graphiques interactifs et des exports CSV.
 
-## Comment interpréter les indications de couverture ?
+## Démarche financière
 
-**Attention : la couverture cible et l'ordre de rééquilibrage ne désignent pas la même chose.**
+### 1. Valoriser une position
 
-- **À S₀ — Couverture initiale** : nombre **total** d'actions à acheter ou vendre pour neutraliser le Delta de la position au cours initial S₀.
-- **À S₁ — Couverture cible** : nombre **total** d'actions à détenir pour neutraliser le Delta après le scénario de variation du spot.
-- **Rééquilibrage de S₀ vers S₁** : nombre **supplémentaire** d'actions à acheter ou vendre **uniquement si la couverture initiale à S₀ a déjà été mise en place**.
+À partir du spot, du strike, de la maturité, du taux sans risque et de la volatilité, l'application calcule un **prix théorique Black–Scholes**. Le sens de la position (long ou short) et la quantité déterminent sa valeur et ses sensibilités signées.
 
-Les deux colonnes du tableau comparatif S₀/S₁ décrivent donc **deux positions cibles totales**, et **non deux ordres successifs à exécuter**. L'encadré de rééquilibrage présente seulement la différence entre ces positions.
+### 2. Mesurer les risques
 
-Mathématiquement, en notant Δ₀ et Δ₁ les Delta **agrégés des options** :
+Les *Greeks* permettent d'interpréter les principaux facteurs de variation de la valeur d'une option :
+
+- **Delta** : sensibilité au cours du sous-jacent.
+- **Gamma** : variation du Delta lorsque le cours du sous-jacent évolue.
+- **Vega** : sensibilité à la volatilité.
+- **Theta** : sensibilité au passage du temps.
+- **Rho** : sensibilité au taux sans risque.
+
+Pour un portefeuille, les sensibilités des différentes positions sont **agrégées**, en tenant compte de leur quantité et de leur sens.
+
+### 3. Simuler et couvrir
+
+L'utilisateur peut définir un scénario de marché à **S₁** et observer la nouvelle valeur du portefeuille, ses sensibilités et la **couverture Delta-neutre nécessaire**. Les visualisations permettent d'étudier l'évolution du risque au-delà d'un seul scénario.
+
+## Comment lire les indications de couverture ?
+
+**La couverture cible et le rééquilibrage sont deux informations différentes.**
+
+- **À S₀ — Couverture initiale** : nombre **total** d'actions à acheter ou vendre pour neutraliser le Delta initial.
+- **À S₁ — Couverture cible** : nouvelle position **totale** en actions nécessaire après le scénario.
+- **Rééquilibrage de S₀ vers S₁** : actions **supplémentaires** à acheter ou vendre, **uniquement si la couverture initiale a déjà été mise en place**.
+
+En notant Δ₀ et Δ₁ les Delta agrégés des positions sur options :
 
 ```text
 Couverture cible à S₀ : H₀ = −Δ₀
 Couverture cible à S₁ : H₁ = −Δ₁
-Rééquilibrage si H₀ est déjà détenue : H₁ − H₀
+Rééquilibrage (si H₀ est déjà détenue) : H₁ − H₀
 ```
 
-**Exemple :**
+**Exemple de lecture :**
 
-| Indication | Lecture |
+| Indication affichée | Signification |
 | --- | --- |
-| À S₀ : **ACHETER 98,68 actions** | Couverture totale initiale nécessaire. |
-| À S₁ : **ACHETER 76,30 actions** | Nouvelle couverture totale nécessaire après le scénario. |
-| Rééquilibrage : **VENDRE 22,37 actions** | Si la couverture initiale est déjà détenue, vendre environ 22,37 actions pour passer de la première position cible à la seconde. |
+| **À S₀ : ACHETER 18,35 actions** | Position totale de couverture initiale. |
+| **À S₁ : VENDRE 64,22 actions** | Nouvelle position totale cible après le scénario. |
+| **Rééquilibrage : VENDRE 82,56 actions** | Ajustement nécessaire pour passer de la couverture initiale à la nouvelle position cible. |
 
-*Les quantités sont arrondies pour l'affichage : le calcul du rééquilibrage utilise les valeurs non arrondies.*
+Les quantités sont arrondies à l'affichage ; les calculs utilisent les valeurs non arrondies.
 
-**Si aucune couverture n'a été mise en place à S₀**, il ne faut **pas** exécuter le rééquilibrage : il faut directement appliquer la **couverture totale cible à S₁**.
+**Sans couverture initiale**, il ne faut pas effectuer l'ajustement indiqué : il faut directement constituer la **position totale cible à S₁**. Les indications sont purement théoriques : **aucun ordre n'est exécuté**.
 
-Toutes ces indications sont **théoriques et informatives** : **aucun achat ni aucune vente n'est exécuté par l'application**.
+## Exemple de scénario
+
+Un portefeuille composé de **100 Calls longs** de strike 112 € et de **100 Puts longs** de strike 117 €, sur un sous-jacent initialement à 108 €, est étudié avec une maturité de 0,5 an, un taux sans risque de 3 % et une volatilité initiale de 20 %.
+
+On simule ensuite un spot à **120,42 €**, une volatilité de **10 %** et **aucun temps écoulé**.
+
+| Indicateur | Situation initiale S₀ | Scénario S₁ |
+| --- | ---: | ---: |
+| Valeur du portefeuille | 1 563,21 € | 1 187,11 € |
+| Delta agrégé | −18,3473 | +64,2170 |
+| Gamma agrégé | +5,0250 | +5,8655 |
+| Couverture Delta-neutre cible | Acheter 18,35 actions | Vendre 64,22 actions |
+
+Si la couverture initiale est détenue, le rééquilibrage consiste à **vendre 82,56 actions**. Cet exemple illustre la différence entre **position cible** et **ajustement de couverture**.
 
 ## Hypothèses et limites
 
-- Modèle de **Black–Scholes–Merton** pour des options **européennes**, sans dividendes (`q = 0`), avec taux sans risque et volatilité supposés constants dans le cadre de la valorisation.
-- Le prix calculé est un **prix théorique**, pas une cotation d'option observée en bourse.
-- Les positions longues et courtes ont des sensibilités signées ; les sensibilités d'un portefeuille sont agrégées selon les quantités et les sens des positions.
-- Convention de **1 action par option** dans les calculs de couverture ; ce n'est pas nécessairement le multiplicateur des contrats négociés sur les marchés.
-- Les scénarios instantanés de spot et les approximations Delta/Gamma ne doivent pas être confondus avec une performance future garantie.
-- Les données historiques de `yfinance` peuvent être différées ou indisponibles. La **volatilité historique** calculée à partir des cours n'est **pas** une volatilité implicite de marché.
-- Les actifs sont présentés en **EUR ou USD**. **Aucune conversion de change automatique** n'est effectuée : il faut éviter de mélanger des montants dans des devises différentes.
-- Le catalogue comporte 300 tickers préconfigurés ; leur disponibilité et leur devise effective restent dépendantes de Yahoo Finance.
-- Les simulations Monte-Carlo dépendent de leurs hypothèses et paramètres : elles ne constituent ni une prévision certaine ni une recommandation d'investissement.
+- Le modèle de **Black–Scholes–Merton** est appliqué aux **options européennes**, sans dividendes (`q = 0`). Les calculs reposent notamment sur des hypothèses de taux sans risque et de volatilité constants.
+- Les prix affichés sont **théoriques** et ne correspondent pas nécessairement aux cotations observées sur un marché.
+- La convention retenue est **une action par option** pour les calculs de couverture ; elle ne reproduit pas nécessairement les multiplicateurs de contrats négociés en bourse.
+- La **volatilité historique**, estimée à partir des cours, ne doit pas être confondue avec la **volatilité implicite** d'une option.
+- Les données fournies par Yahoo Finance peuvent être différées, manquantes ou indisponibles ; la disponibilité des 300 tickers préconfigurés dépend de cette source.
+- Les montants sont présentés en **EUR ou USD**, **sans conversion de change automatique**.
+- Les approximations par les Greeks et les simulations Monte-Carlo dépendent des hypothèses retenues ; elles ne constituent pas des prévisions certaines.
 
-## Installation et exécution
+## Utilisation de l'application
 
-### Prérequis
+1. **Ouvrir l'application en ligne** à partir du lien en haut de cette page.
+2. Choisir **Position individuelle**, **Portefeuille multi-options**, **Monte-Carlo** ou **Données réelles**.
+3. Renseigner les paramètres de marché et les caractéristiques des options, ou importer un spot et une volatilité historique depuis le module de données réelles.
+4. Consulter la valorisation, les Greeks et les graphiques.
+5. Modifier le scénario de marché et comparer les résultats à **S₀** et **S₁**.
+6. Interpréter séparément la **couverture cible** et son **rééquilibrage éventuel**.
 
-- Python et `pip`
-- Les dépendances Python du dépôt (`requirements.txt`)
-- Les fichiers auxiliaires de simulation Monte-Carlo présents dans le dépôt
+## Exécution locale (facultative)
 
-### Depuis le dépôt GitHub
+**L'application est accessible directement dans un navigateur, sans installation.** Pour exécuter le code source localement, avec Python installé :
 
-```powershell
+```bash
 git clone https://github.com/AnthonyIREF/Option-Risk-Manager.git
 cd Option-Risk-Manager
 python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-Vérifier que `requirements.txt` comprend notamment `streamlit`, `numpy`, `pandas`, `scipy`, `plotly` et **`yfinance`**, ainsi que les dépendances nécessaires aux modules auxiliaires.
+Les fichiers auxiliaires nécessaires aux simulations doivent être conservés dans le dépôt, aux côtés de `app.py`.
 
-Le programme principal importe les modules :
+## Technologies utilisées
 
-- `option_mc_hedging_v12.py`
-- `option_mc_trace_v12_1.py`
-
-Ils doivent être disponibles à côté de `app.py`.
-
-### Depuis JupyterLab
-
-Le fichier de livraison au format `.txt` peut commencer par `%%writefile app.py`, commande spécifique à une cellule Jupyter. **Cette ligne ne doit pas être copiée dans `app.py` sur GitHub.**
-
-Dans le terminal JupyterLab :
-
-```powershell
-cd C:\Users\antho
-streamlit run app.py
-```
-
-## Utilisation rapide
-
-1. Choisir le mode **Position individuelle** ou **Portefeuille multi-options**.
-2. Renseigner le spot, le strike, la maturité, le taux sans risque, la volatilité, le type d'option et la quantité.
-3. Consulter le prix, les Greeks et la **couverture Delta-neutre à S₀**.
-4. Modifier le spot simulé **S₁** pour observer la nouvelle exposition.
-5. Lire la **couverture totale cible à S₁**, puis le **rééquilibrage** si la couverture initiale a effectivement été prise.
-6. Explorer les graphiques, le P&L, les stress tests ou la simulation Monte-Carlo.
-
-Dans **Données réelles**, sélectionner une action, charger son historique et, si souhaité, importer le spot et la volatilité historique dans les autres modes. Les autres paramètres restent à renseigner ou à vérifier manuellement.
-
-## Technologies
-
-Python · Streamlit · NumPy · pandas · SciPy · Plotly · yfinance
+**Python · Streamlit · NumPy · pandas · SciPy · Plotly · yfinance**
 
 ## Références
 
