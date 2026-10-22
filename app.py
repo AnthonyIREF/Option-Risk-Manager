@@ -2999,56 +2999,67 @@ elif mode == "Portefeuille multi-options":
         live_delta = sum(o["position_delta"] for o in live_portfolio)
         live_gamma = sum(o["position_gamma"] for o in live_portfolio)
         live_hedge = -live_delta
-        st.markdown("#### Risques du portefeuille au scénario S₁")
-        live_cols = st.columns(4)
-        for col, title, current, base, unit, digits in zip(
-            live_cols,
-            ("Valeur", "Delta", "Gamma", "Couverture cible"),
-            (live_value, live_delta, live_gamma, live_hedge),
-            (total_value, total_delta, total_gamma, portfolio_hedge),
-            (f" {orm_currency_symbol}", " actions", f" actions/{orm_currency_symbol}", " actions"),
-            (2, 4, 4, 2)):
-            col.metric(title, f"{format_fr(current, digits)}{unit}",
-                       delta=f"à S₀ : {format_fr(base, digits)}{unit}", delta_color="off")
-        st.markdown(f"**Couverture à S₀ :** {trade_instruction(portfolio_hedge)}  "
-                    f"\n\n**Ajustement à S₁ :** {trade_instruction(live_hedge - portfolio_hedge)}")
-
-        # --------------------------------------------------------
-        # INDICATEURS DU PORTEFEUILLE
-        # --------------------------------------------------------
-
+        # Comparaison unique : situation initiale et scénario simulé.
         st.markdown(
-            "<div class='section-kicker'>Portfolio risk</div><div class='section-title'>Risque agrégé</div>",
+            "<div class='section-kicker'>Portfolio risk</div>"
+            "<div class='section-title'>Évolution du risque et de la couverture</div>",
             unsafe_allow_html=True
         )
-
-        p1, p2, p3 = st.columns(3)
-        p1.metric("Valeur portefeuille", f"{format_fr(total_value)} {orm_currency_symbol}")
-        p2.metric("Δ  Delta portefeuille", format_fr(total_delta, 4))
-        p3.metric("Γ  Gamma portefeuille", format_fr(total_gamma, 4))
-
-        if portfolio_hedge > 1e-12:
-            st.markdown(
-                f"<div class='trade-card buy'><div class='trade-label'>Couverture Delta-neutre à S₀ · position cible</div>"
-                f"<div class='trade-value'>ACHETER {format_fr(abs(portfolio_hedge), 2)} ACTIONS</div>"
-                f"<div class='trade-note'>Position cible théorique à S₀ pour neutraliser le Delta agrégé ; aucune exécution présumée.</div></div>",
-                unsafe_allow_html=True
-            )
-        elif portfolio_hedge < -1e-12:
-            st.markdown(
-                f"<div class='trade-card sell'><div class='trade-label'>Couverture Delta-neutre à S₀ · position cible</div>"
-                f"<div class='trade-value'>VENDRE {format_fr(abs(portfolio_hedge), 2)} ACTIONS</div>"
-                f"<div class='trade-note'>Position cible théorique à S₀ pour neutraliser le Delta agrégé ; aucune exécution présumée.</div></div>",
-                unsafe_allow_html=True
-            )
-        else:
-            st.markdown(
-                "<div class='trade-card'><div class='trade-label'>Couverture Delta-neutre à S₀ · position cible</div>"
-                "<div class='trade-value'>PORTEFEUILLE DELTA-NEUTRE</div>"
-                "<div class='trade-note'>Aucune position de couverture supplémentaire nécessaire à S₀.</div></div>",
-                unsafe_allow_html=True
-            )
-
+        risk_comparison = pd.DataFrame({
+            "Indicateur": ["Valeur du portefeuille", "Delta agrégé", "Gamma agrégé", "Actions à détenir pour être couvert"],
+            "À S₀ — Avant scénario": [
+                f"{format_fr(total_value, 2)} {orm_currency_symbol}",
+                f"{format_fr(total_delta, 4)} actions",
+                f"{format_fr(total_gamma, 4)} actions/{orm_currency_symbol}",
+                trade_instruction(portfolio_hedge),
+            ],
+            "À S₁ — Après scénario": [
+                f"{format_fr(live_value, 2)} {orm_currency_symbol}",
+                f"{format_fr(live_delta, 4)} actions",
+                f"{format_fr(live_gamma, 4)} actions/{orm_currency_symbol}",
+                trade_instruction(live_hedge),
+            ],
+        })
+        st.dataframe(risk_comparison, hide_index=True, use_container_width=True)
+        st.caption(
+            "Chaque colonne indique la position totale de couverture Delta-neutre "
+            "nécessaire à cet instant, et non un nouvel ordre à exécuter."
+        )
+        # La carte explique uniquement la transaction de rééquilibrage,
+        # sous l'hypothèse que la couverture initiale est déjà détenue.
+        hedge_adjustment = live_hedge - portfolio_hedge
+        hedge_adjustment_label = trade_instruction(hedge_adjustment)
+        initial_hedge_label = trade_instruction(portfolio_hedge).lower()
+        scenario_hedge_label = trade_instruction(live_hedge).lower()
+        st.markdown(f"""
+        <div style="margin:18px 0 16px; padding:20px 24px; border-radius:14px;
+                    background:#ffffff; border:1px solid #dbe5f0;
+                    border-left:4px solid #2563eb; color:#172b4d;
+                    box-shadow:0 3px 12px rgba(17,42,75,.06);">
+            <div style="font-size:.74rem;letter-spacing:.09em;font-weight:750;
+                        color:#54739a;text-transform:uppercase;">
+                Ajustement de la couverture de S₀ vers S₁
+            </div>
+            <div style="font-size:1.65rem;line-height:1.4;font-weight:800;
+                        margin:7px 0 10px;color:#173b69;">
+                {hedge_adjustment_label}
+            </div>
+            <div style="font-size:.89rem;color:#475569;line-height:1.65;">
+                Si la couverture initiale (<strong>{initial_hedge_label}</strong>)
+                est déjà en place, cet ajustement permet d'atteindre la nouvelle
+                position cible à S₁ (<strong>{scenario_hedge_label}</strong>).
+            </div>
+            <div style="font-size:.85rem;color:#475569;line-height:1.6;
+                        border-top:1px solid #e2e8f0;margin-top:12px;padding-top:10px;">
+                <strong>Sans couverture initiale :</strong> constituer directement
+                la position cible à S₁, soit <strong>{scenario_hedge_label}</strong>.
+            </div>
+        </div>
+        <div style="font-size:.79rem;color:#64748b;margin:-5px 0 14px;">
+            Indications théoriques uniquement · Aucun ordre n'est exécuté.
+        </div>
+        """, unsafe_allow_html=True)
+        st.markdown("#### Sensibilités complémentaires à S₀")
         p4, p5, p6 = st.columns(3)
         p4.metric("ν  Vega (+1 pt de vol.)", f"{format_fr(total_vega, 4)} {orm_currency_symbol}")
         p5.metric("Θ  Theta / jour", f"{format_fr(total_theta, 4)} {orm_currency_symbol}")
@@ -3957,7 +3968,7 @@ elif mode == "Monte-Carlo & couverture dynamique":
 
 elif mode == "Données réelles":
     st.subheader("Données réelles de marché")
-    st.caption("Yahoo Finance via yfinance : données historiques potentiellement différées. Les valorisations Black-Scholes restent théoriques.")
+    st.caption("300 actions cotées en EUR ou USD · Yahoo Finance via yfinance : données historiques potentiellement différées. Les valorisations Black-Scholes restent théoriques.")
 
     try:
         import yfinance as yf
@@ -3966,36 +3977,309 @@ elif mode == "Données réelles":
         st.stop()
 
     # Une entrée = (nom, ticker, zone, type, devise attendue).
-    # La devise affichée est indicative : elle doit être confirmée par la place de cotation.
+    # 300 actions EUR/USD ; devise indicative à vérifier auprès de Yahoo Finance.
+    # Les indices (cotés en points) sont volontairement exclus.
     ASSETS_V125 = [
-        ("Apple", "AAPL", "États-Unis", "Action", "USD"),
-        ("Microsoft", "MSFT", "États-Unis", "Action", "USD"),
-        ("NVIDIA", "NVDA", "États-Unis", "Action", "USD"),
-        ("Amazon", "AMZN", "États-Unis", "Action", "USD"),
-        ("Alphabet", "GOOGL", "États-Unis", "Action", "USD"),
-        ("Meta Platforms", "META", "États-Unis", "Action", "USD"),
-        ("Tesla", "TSLA", "États-Unis", "Action", "USD"),
-        ("Broadcom", "AVGO", "États-Unis", "Action", "USD"),
-        ("JPMorgan Chase", "JPM", "États-Unis", "Action", "USD"),
-        ("Visa", "V", "États-Unis", "Action", "USD"),
-        ("Walmart", "WMT", "États-Unis", "Action", "USD"),
-        ("Netflix", "NFLX", "États-Unis", "Action", "USD"),
-        ("Coca-Cola", "KO", "États-Unis", "Action", "USD"),
-        ("Berkshire Hathaway B", "BRK-B", "États-Unis", "Action", "USD"),
-        ("AMD", "AMD", "États-Unis", "Action", "USD"),
-        ("LVMH", "MC.PA", "France", "Action", "EUR"),
-        ("TotalEnergies", "TTE.PA", "France", "Action", "EUR"),
-        ("Air Liquide", "AI.PA", "France", "Action", "EUR"),
-        ("BNP Paribas", "BNP.PA", "France", "Action", "EUR"),
-        ("Thales", "HO.PA", "France", "Action", "EUR"),
-        ("Airbus", "AIR.PA", "France", "Action", "EUR"),
-        ("Schneider Electric", "SU.PA", "France", "Action", "EUR"),
-        ("Sanofi", "SAN.PA", "France", "Action", "EUR"),
-        ("L'Oréal", "OR.PA", "France", "Action", "EUR"),
-        ("Hermès", "RMS.PA", "France", "Action", "EUR"),
-        ("CAC 40", "^FCHI", "France", "Indice", "points"),
-        ("S&P 500", "^GSPC", "États-Unis", "Indice", "points"),
-        ("Nasdaq-100", "^NDX", "États-Unis", "Indice", "points"),
+        ('Apple', 'AAPL', 'États-Unis', 'Action', 'USD'),
+        ('Microsoft', 'MSFT', 'États-Unis', 'Action', 'USD'),
+        ('NVIDIA', 'NVDA', 'États-Unis', 'Action', 'USD'),
+        ('Amazon', 'AMZN', 'États-Unis', 'Action', 'USD'),
+        ('Alphabet Class A', 'GOOGL', 'États-Unis', 'Action', 'USD'),
+        ('Alphabet Class C', 'GOOG', 'États-Unis', 'Action', 'USD'),
+        ('Meta Platforms', 'META', 'États-Unis', 'Action', 'USD'),
+        ('Tesla', 'TSLA', 'États-Unis', 'Action', 'USD'),
+        ('Broadcom', 'AVGO', 'États-Unis', 'Action', 'USD'),
+        ('JPMorgan Chase', 'JPM', 'États-Unis', 'Action', 'USD'),
+        ('Visa', 'V', 'États-Unis', 'Action', 'USD'),
+        ('Walmart', 'WMT', 'États-Unis', 'Action', 'USD'),
+        ('Netflix', 'NFLX', 'États-Unis', 'Action', 'USD'),
+        ('Coca-Cola', 'KO', 'États-Unis', 'Action', 'USD'),
+        ('Berkshire Hathaway B', 'BRK-B', 'États-Unis', 'Action', 'USD'),
+        ('Advanced Micro Devices', 'AMD', 'États-Unis', 'Action', 'USD'),
+        ('Mastercard', 'MA', 'États-Unis', 'Action', 'USD'),
+        ('Oracle', 'ORCL', 'États-Unis', 'Action', 'USD'),
+        ('Costco', 'COST', 'États-Unis', 'Action', 'USD'),
+        ('Home Depot', 'HD', 'États-Unis', 'Action', 'USD'),
+        ('Procter & Gamble', 'PG', 'États-Unis', 'Action', 'USD'),
+        ('Johnson & Johnson', 'JNJ', 'États-Unis', 'Action', 'USD'),
+        ('AbbVie', 'ABBV', 'États-Unis', 'Action', 'USD'),
+        ('Bank of America', 'BAC', 'États-Unis', 'Action', 'USD'),
+        ('Salesforce', 'CRM', 'États-Unis', 'Action', 'USD'),
+        ('Chevron', 'CVX', 'États-Unis', 'Action', 'USD'),
+        ('Exxon Mobil', 'XOM', 'États-Unis', 'Action', 'USD'),
+        ('UnitedHealth', 'UNH', 'États-Unis', 'Action', 'USD'),
+        ('Merck', 'MRK', 'États-Unis', 'Action', 'USD'),
+        ('PepsiCo', 'PEP', 'États-Unis', 'Action', 'USD'),
+        ('Cisco', 'CSCO', 'États-Unis', 'Action', 'USD'),
+        ('Accenture', 'ACN', 'États-Unis', 'Action', 'USD'),
+        ('IBM', 'IBM', 'États-Unis', 'Action', 'USD'),
+        ("McDonald's", 'MCD', 'États-Unis', 'Action', 'USD'),
+        ('Linde', 'LIN', 'États-Unis', 'Action', 'USD'),
+        ('GE Aerospace', 'GE', 'États-Unis', 'Action', 'USD'),
+        ('Caterpillar', 'CAT', 'États-Unis', 'Action', 'USD'),
+        ('Goldman Sachs', 'GS', 'États-Unis', 'Action', 'USD'),
+        ('Morgan Stanley', 'MS', 'États-Unis', 'Action', 'USD'),
+        ('American Express', 'AXP', 'États-Unis', 'Action', 'USD'),
+        ('ServiceNow', 'NOW', 'États-Unis', 'Action', 'USD'),
+        ('Adobe', 'ADBE', 'États-Unis', 'Action', 'USD'),
+        ('Qualcomm', 'QCOM', 'États-Unis', 'Action', 'USD'),
+        ('Texas Instruments', 'TXN', 'États-Unis', 'Action', 'USD'),
+        ('Intuit', 'INTU', 'États-Unis', 'Action', 'USD'),
+        ('Applied Materials', 'AMAT', 'États-Unis', 'Action', 'USD'),
+        ('Intuitive Surgical', 'ISRG', 'États-Unis', 'Action', 'USD'),
+        ('Booking Holdings', 'BKNG', 'États-Unis', 'Action', 'USD'),
+        ('S&P Global', 'SPGI', 'États-Unis', 'Action', 'USD'),
+        ('BlackRock', 'BLK', 'États-Unis', 'Action', 'USD'),
+        ('NextEra Energy', 'NEE', 'États-Unis', 'Action', 'USD'),
+        ('Pfizer', 'PFE', 'États-Unis', 'Action', 'USD'),
+        ('Thermo Fisher Scientific', 'TMO', 'États-Unis', 'Action', 'USD'),
+        ('Danaher', 'DHR', 'États-Unis', 'Action', 'USD'),
+        ('Abbott Laboratories', 'ABT', 'États-Unis', 'Action', 'USD'),
+        ('Walt Disney', 'DIS', 'États-Unis', 'Action', 'USD'),
+        ('Comcast', 'CMCSA', 'États-Unis', 'Action', 'USD'),
+        ('Verizon', 'VZ', 'États-Unis', 'Action', 'USD'),
+        ('AT&T', 'T', 'États-Unis', 'Action', 'USD'),
+        ("Lowe's", 'LOW', 'États-Unis', 'Action', 'USD'),
+        ('Honeywell', 'HON', 'États-Unis', 'Action', 'USD'),
+        ('Union Pacific', 'UNP', 'États-Unis', 'Action', 'USD'),
+        ('RTX', 'RTX', 'États-Unis', 'Action', 'USD'),
+        ('Lockheed Martin', 'LMT', 'États-Unis', 'Action', 'USD'),
+        ('Boeing', 'BA', 'États-Unis', 'Action', 'USD'),
+        ('Deere & Company', 'DE', 'États-Unis', 'Action', 'USD'),
+        ('UPS', 'UPS', 'États-Unis', 'Action', 'USD'),
+        ('FedEx', 'FDX', 'États-Unis', 'Action', 'USD'),
+        ('Nike', 'NKE', 'États-Unis', 'Action', 'USD'),
+        ('Starbucks', 'SBUX', 'États-Unis', 'Action', 'USD'),
+        ('Medtronic', 'MDT', 'États-Unis', 'Action', 'USD'),
+        ('Stryker', 'SYK', 'États-Unis', 'Action', 'USD'),
+        ('Gilead Sciences', 'GILD', 'États-Unis', 'Action', 'USD'),
+        ('Amgen', 'AMGN', 'États-Unis', 'Action', 'USD'),
+        ('Regeneron', 'REGN', 'États-Unis', 'Action', 'USD'),
+        ('Vertex Pharmaceuticals', 'VRTX', 'États-Unis', 'Action', 'USD'),
+        ('Elevance Health', 'ELV', 'États-Unis', 'Action', 'USD'),
+        ('Cigna', 'CI', 'États-Unis', 'Action', 'USD'),
+        ('Humana', 'HUM', 'États-Unis', 'Action', 'USD'),
+        ('CVS Health', 'CVS', 'États-Unis', 'Action', 'USD'),
+        ('HCA Healthcare', 'HCA', 'États-Unis', 'Action', 'USD'),
+        ('Boston Scientific', 'BSX', 'États-Unis', 'Action', 'USD'),
+        ('Zoetis', 'ZTS', 'États-Unis', 'Action', 'USD'),
+        ('Bristol Myers Squibb', 'BMY', 'États-Unis', 'Action', 'USD'),
+        ('Eli Lilly', 'LLY', 'États-Unis', 'Action', 'USD'),
+        ('Altria', 'MO', 'États-Unis', 'Action', 'USD'),
+        ('Philip Morris', 'PM', 'États-Unis', 'Action', 'USD'),
+        ('Colgate-Palmolive', 'CL', 'États-Unis', 'Action', 'USD'),
+        ('Kimberly-Clark', 'KMB', 'États-Unis', 'Action', 'USD'),
+        ('General Mills', 'GIS', 'États-Unis', 'Action', 'USD'),
+        ('Kellanova', 'K', 'États-Unis', 'Action', 'USD'),
+        ('Hershey', 'HSY', 'États-Unis', 'Action', 'USD'),
+        ('Mondelez', 'MDLZ', 'États-Unis', 'Action', 'USD'),
+        ('Kraft Heinz', 'KHC', 'États-Unis', 'Action', 'USD'),
+        ('Constellation Brands', 'STZ', 'États-Unis', 'Action', 'USD'),
+        ('Target', 'TGT', 'États-Unis', 'Action', 'USD'),
+        ('Dollar General', 'DG', 'États-Unis', 'Action', 'USD'),
+        ('Dollar Tree', 'DLTR', 'États-Unis', 'Action', 'USD'),
+        ('Ross Stores', 'ROST', 'États-Unis', 'Action', 'USD'),
+        ('TJX Companies', 'TJX', 'États-Unis', 'Action', 'USD'),
+        ('eBay', 'EBAY', 'États-Unis', 'Action', 'USD'),
+        ('Etsy', 'ETSY', 'États-Unis', 'Action', 'USD'),
+        ('PayPal', 'PYPL', 'États-Unis', 'Action', 'USD'),
+        ('Block', 'SQ', 'États-Unis', 'Action', 'USD'),
+        ('Coinbase', 'COIN', 'États-Unis', 'Action', 'USD'),
+        ('Robinhood', 'HOOD', 'États-Unis', 'Action', 'USD'),
+        ('Uber', 'UBER', 'États-Unis', 'Action', 'USD'),
+        ('DoorDash', 'DASH', 'États-Unis', 'Action', 'USD'),
+        ('Airbnb', 'ABNB', 'États-Unis', 'Action', 'USD'),
+        ('Expedia', 'EXPE', 'États-Unis', 'Action', 'USD'),
+        ('Marriott', 'MAR', 'États-Unis', 'Action', 'USD'),
+        ('Hilton', 'HLT', 'États-Unis', 'Action', 'USD'),
+        ('Royal Caribbean', 'RCL', 'États-Unis', 'Action', 'USD'),
+        ('Carnival', 'CCL', 'États-Unis', 'Action', 'USD'),
+        ('Delta Air Lines', 'DAL', 'États-Unis', 'Action', 'USD'),
+        ('United Airlines', 'UAL', 'États-Unis', 'Action', 'USD'),
+        ('American Airlines', 'AAL', 'États-Unis', 'Action', 'USD'),
+        ('Southwest Airlines', 'LUV', 'États-Unis', 'Action', 'USD'),
+        ('Ford', 'F', 'États-Unis', 'Action', 'USD'),
+        ('General Motors', 'GM', 'États-Unis', 'Action', 'USD'),
+        ('Rivian', 'RIVN', 'États-Unis', 'Action', 'USD'),
+        ('Lucid Group', 'LCID', 'États-Unis', 'Action', 'USD'),
+        ('Toyota ADR', 'TM', 'États-Unis', 'Action', 'USD'),
+        ('Sony ADR', 'SONY', 'États-Unis', 'Action', 'USD'),
+        ('Shopify', 'SHOP', 'États-Unis', 'Action', 'USD'),
+        ('Palantir', 'PLTR', 'États-Unis', 'Action', 'USD'),
+        ('Snowflake', 'SNOW', 'États-Unis', 'Action', 'USD'),
+        ('Datadog', 'DDOG', 'États-Unis', 'Action', 'USD'),
+        ('Cloudflare', 'NET', 'États-Unis', 'Action', 'USD'),
+        ('CrowdStrike', 'CRWD', 'États-Unis', 'Action', 'USD'),
+        ('Palo Alto Networks', 'PANW', 'États-Unis', 'Action', 'USD'),
+        ('Fortinet', 'FTNT', 'États-Unis', 'Action', 'USD'),
+        ('Zscaler', 'ZS', 'États-Unis', 'Action', 'USD'),
+        ('Okta', 'OKTA', 'États-Unis', 'Action', 'USD'),
+        ('MongoDB', 'MDB', 'États-Unis', 'Action', 'USD'),
+        ('Atlassian', 'TEAM', 'États-Unis', 'Action', 'USD'),
+        ('Workday', 'WDAY', 'États-Unis', 'Action', 'USD'),
+        ('Autodesk', 'ADSK', 'États-Unis', 'Action', 'USD'),
+        ('ANSYS', 'ANSS', 'États-Unis', 'Action', 'USD'),
+        ('Cadence Design Systems', 'CDNS', 'États-Unis', 'Action', 'USD'),
+        ('Synopsys', 'SNPS', 'États-Unis', 'Action', 'USD'),
+        ('Micron Technology', 'MU', 'États-Unis', 'Action', 'USD'),
+        ('Intel', 'INTC', 'États-Unis', 'Action', 'USD'),
+        ('KLA Corporation', 'KLAC', 'États-Unis', 'Action', 'USD'),
+        ('Lam Research', 'LRCX', 'États-Unis', 'Action', 'USD'),
+        ('Analog Devices', 'ADI', 'États-Unis', 'Action', 'USD'),
+        ('NXP Semiconductors', 'NXPI', 'États-Unis', 'Action', 'USD'),
+        ('ON Semiconductor', 'ON', 'États-Unis', 'Action', 'USD'),
+        ('Microchip Technology', 'MCHP', 'États-Unis', 'Action', 'USD'),
+        ('Marvell Technology', 'MRVL', 'États-Unis', 'Action', 'USD'),
+        ('Arm Holdings ADR', 'ARM', 'États-Unis', 'Action', 'USD'),
+        ('Dell Technologies', 'DELL', 'États-Unis', 'Action', 'USD'),
+        ('HP Inc.', 'HPQ', 'États-Unis', 'Action', 'USD'),
+        ('Hewlett Packard Enterprise', 'HPE', 'États-Unis', 'Action', 'USD'),
+        ('Super Micro Computer', 'SMCI', 'États-Unis', 'Action', 'USD'),
+        ('NetApp', 'NTAP', 'États-Unis', 'Action', 'USD'),
+        ('Western Digital', 'WDC', 'États-Unis', 'Action', 'USD'),
+        ('Seagate Technology', 'STX', 'États-Unis', 'Action', 'USD'),
+        ('First Solar', 'FSLR', 'États-Unis', 'Action', 'USD'),
+        ('Enphase Energy', 'ENPH', 'États-Unis', 'Action', 'USD'),
+        ('SolarEdge', 'SEDG', 'États-Unis', 'Action', 'USD'),
+        ('Newmont', 'NEM', 'États-Unis', 'Action', 'USD'),
+        ('Freeport-McMoRan', 'FCX', 'États-Unis', 'Action', 'USD'),
+        ('Nucor', 'NUE', 'États-Unis', 'Action', 'USD'),
+        ('Steel Dynamics', 'STLD', 'États-Unis', 'Action', 'USD'),
+        ('Alcoa', 'AA', 'États-Unis', 'Action', 'USD'),
+        ('Dow Inc.', 'DOW', 'États-Unis', 'Action', 'USD'),
+        ('DuPont', 'DD', 'États-Unis', 'Action', 'USD'),
+        ('Air Products', 'APD', 'États-Unis', 'Action', 'USD'),
+        ('Ecolab', 'ECL', 'États-Unis', 'Action', 'USD'),
+        ('Sherwin-Williams', 'SHW', 'États-Unis', 'Action', 'USD'),
+        ('Parker-Hannifin', 'PH', 'États-Unis', 'Action', 'USD'),
+        ('Eaton', 'ETN', 'États-Unis', 'Action', 'USD'),
+        ('Emerson Electric', 'EMR', 'États-Unis', 'Action', 'USD'),
+        ('Illinois Tool Works', 'ITW', 'États-Unis', 'Action', 'USD'),
+        ('3M', 'MMM', 'États-Unis', 'Action', 'USD'),
+        ('GE Vernova', 'GEV', 'États-Unis', 'Action', 'USD'),
+        ('Quanta Services', 'PWR', 'États-Unis', 'Action', 'USD'),
+        ('Johnson Controls', 'JCI', 'États-Unis', 'Action', 'USD'),
+        ('Carrier Global', 'CARR', 'États-Unis', 'Action', 'USD'),
+        ('Trane Technologies', 'TT', 'États-Unis', 'Action', 'USD'),
+        ('Waste Management', 'WM', 'États-Unis', 'Action', 'USD'),
+        ('Republic Services', 'RSG', 'États-Unis', 'Action', 'USD'),
+        ('Southern Company', 'SO', 'États-Unis', 'Action', 'USD'),
+        ('Duke Energy', 'DUK', 'États-Unis', 'Action', 'USD'),
+        ('American Electric Power', 'AEP', 'États-Unis', 'Action', 'USD'),
+        ('Exelon', 'EXC', 'États-Unis', 'Action', 'USD'),
+        ('Xcel Energy', 'XEL', 'États-Unis', 'Action', 'USD'),
+        ('Sempra', 'SRE', 'États-Unis', 'Action', 'USD'),
+        ('Realty Income', 'O', 'États-Unis', 'Action', 'USD'),
+        ('Prologis', 'PLD', 'États-Unis', 'Action', 'USD'),
+        ('American Tower', 'AMT', 'États-Unis', 'Action', 'USD'),
+        ('Equinix', 'EQIX', 'États-Unis', 'Action', 'USD'),
+        ('Digital Realty', 'DLR', 'États-Unis', 'Action', 'USD'),
+        ('Simon Property Group', 'SPG', 'États-Unis', 'Action', 'USD'),
+        ('Chubb', 'CB', 'États-Unis', 'Action', 'USD'),
+        ('Progressive', 'PGR', 'États-Unis', 'Action', 'USD'),
+        ('Travelers', 'TRV', 'États-Unis', 'Action', 'USD'),
+        ('American International Group', 'AIG', 'États-Unis', 'Action', 'USD'),
+        ('MetLife', 'MET', 'États-Unis', 'Action', 'USD'),
+        ('LVMH', 'MC.PA', 'France', 'Action', 'EUR'),
+        ('TotalEnergies', 'TTE.PA', 'France', 'Action', 'EUR'),
+        ('Air Liquide', 'AI.PA', 'France', 'Action', 'EUR'),
+        ('BNP Paribas', 'BNP.PA', 'France', 'Action', 'EUR'),
+        ('Thales', 'HO.PA', 'France', 'Action', 'EUR'),
+        ('Airbus', 'AIR.PA', 'France', 'Action', 'EUR'),
+        ('Schneider Electric', 'SU.PA', 'France', 'Action', 'EUR'),
+        ('Sanofi', 'SAN.PA', 'France', 'Action', 'EUR'),
+        ("L'Oréal", 'OR.PA', 'France', 'Action', 'EUR'),
+        ('Hermès', 'RMS.PA', 'France', 'Action', 'EUR'),
+        ('Crédit Agricole', 'ACA.PA', 'France', 'Action', 'EUR'),
+        ('Société Générale', 'GLE.PA', 'France', 'Action', 'EUR'),
+        ('AXA', 'CS.PA', 'France', 'Action', 'EUR'),
+        ('Vinci', 'DG.PA', 'France', 'Action', 'EUR'),
+        ('Bouygues', 'EN.PA', 'France', 'Action', 'EUR'),
+        ('Capgemini', 'CAP.PA', 'France', 'Action', 'EUR'),
+        ('Dassault Systèmes', 'DSY.PA', 'France', 'Action', 'EUR'),
+        ('Safran', 'SAF.PA', 'France', 'Action', 'EUR'),
+        ('Kering', 'KER.PA', 'France', 'Action', 'EUR'),
+        ('Pernod Ricard', 'RI.PA', 'France', 'Action', 'EUR'),
+        ('Publicis Groupe', 'PUB.PA', 'France', 'Action', 'EUR'),
+        ('Veolia', 'VIE.PA', 'France', 'Action', 'EUR'),
+        ('Engie', 'ENGI.PA', 'France', 'Action', 'EUR'),
+        ('Orange', 'ORA.PA', 'France', 'Action', 'EUR'),
+        ('Saint-Gobain', 'SGO.PA', 'France', 'Action', 'EUR'),
+        ('Legrand', 'LR.PA', 'France', 'Action', 'EUR'),
+        ('STMicroelectronics', 'STMPA.PA', 'France', 'Action', 'EUR'),
+        ('Michelin', 'ML.PA', 'France', 'Action', 'EUR'),
+        ('Vivendi', 'VIV.PA', 'France', 'Action', 'EUR'),
+        ('Renault', 'RNO.PA', 'France', 'Action', 'EUR'),
+        ('EssilorLuxottica', 'EL.PA', 'France', 'Action', 'EUR'),
+        ('Eurofins Scientific', 'ERF.PA', 'France', 'Action', 'EUR'),
+        ('Unibail-Rodamco-Westfield', 'URW.PA', 'France', 'Action', 'EUR'),
+        ('Teleperformance', 'TEP.PA', 'France', 'Action', 'EUR'),
+        ('Alstom', 'ALO.PA', 'France', 'Action', 'EUR'),
+        ('Carrefour', 'CA.PA', 'France', 'Action', 'EUR'),
+        ('Edenred', 'EDEN.PA', 'France', 'Action', 'EUR'),
+        ('Bureau Veritas', 'BVI.PA', 'France', 'Action', 'EUR'),
+        ('Sodexo', 'SW.PA', 'France', 'Action', 'EUR'),
+        ('FDJ United', 'FDJ.PA', 'France', 'Action', 'EUR'),
+        ('SAP', 'SAP.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Siemens', 'SIE.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Allianz', 'ALV.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Deutsche Telekom', 'DTE.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Mercedes-Benz Group', 'MBG.DE', 'Allemagne', 'Action', 'EUR'),
+        ('BMW', 'BMW.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Volkswagen Pref.', 'VOW3.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Porsche AG', 'P911.DE', 'Allemagne', 'Action', 'EUR'),
+        ('BASF', 'BAS.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Bayer', 'BAYN.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Deutsche Bank', 'DBK.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Commerzbank', 'CBK.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Infineon', 'IFX.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Adidas', 'ADS.DE', 'Allemagne', 'Action', 'EUR'),
+        ('RWE', 'RWE.DE', 'Allemagne', 'Action', 'EUR'),
+        ('E.ON', 'EOAN.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Henkel Pref.', 'HEN3.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Beiersdorf', 'BEI.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Munich Re', 'MUV2.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Hannover Re', 'HNR1.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Deutsche Börse', 'DB1.DE', 'Allemagne', 'Action', 'EUR'),
+        ('DHL Group', 'DHL.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Heidelberg Materials', 'HEI.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Fresenius', 'FRE.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Fresenius Medical Care', 'FME.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Vonovia', 'VNA.DE', 'Allemagne', 'Action', 'EUR'),
+        ('MTU Aero Engines', 'MTX.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Siemens Healthineers', 'SHL.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Continental', 'CON.DE', 'Allemagne', 'Action', 'EUR'),
+        ('Symrise', 'SY1.DE', 'Allemagne', 'Action', 'EUR'),
+        ('ASML', 'ASML.AS', 'Pays-Bas', 'Action', 'EUR'),
+        ('Adyen', 'ADYEN.AS', 'Pays-Bas', 'Action', 'EUR'),
+        ('ING Groep', 'INGA.AS', 'Pays-Bas', 'Action', 'EUR'),
+        ('Philips', 'PHIA.AS', 'Pays-Bas', 'Action', 'EUR'),
+        ('Heineken', 'HEIA.AS', 'Pays-Bas', 'Action', 'EUR'),
+        ('Ahold Delhaize', 'AD.AS', 'Pays-Bas', 'Action', 'EUR'),
+        ('Wolters Kluwer', 'WKL.AS', 'Pays-Bas', 'Action', 'EUR'),
+        ('Akzo Nobel', 'AKZA.AS', 'Pays-Bas', 'Action', 'EUR'),
+        ('NN Group', 'NN.AS', 'Pays-Bas', 'Action', 'EUR'),
+        ('Aegon', 'AGN.AS', 'Pays-Bas', 'Action', 'EUR'),
+        ('ASM International', 'ASM.AS', 'Pays-Bas', 'Action', 'EUR'),
+        ('KPN', 'KPN.AS', 'Pays-Bas', 'Action', 'EUR'),
+        ('Unilever', 'UNA.AS', 'Pays-Bas', 'Action', 'EUR'),
+        ('Randstad', 'RAND.AS', 'Pays-Bas', 'Action', 'EUR'),
+        ('Prosus', 'PRX.AS', 'Pays-Bas', 'Action', 'EUR'),
+        ('Inditex', 'ITX.MC', 'Espagne', 'Action', 'EUR'),
+        ('Banco Santander', 'SAN.MC', 'Espagne', 'Action', 'EUR'),
+        ('BBVA', 'BBVA.MC', 'Espagne', 'Action', 'EUR'),
+        ('Iberdrola', 'IBE.MC', 'Espagne', 'Action', 'EUR'),
+        ('Telefónica', 'TEF.MC', 'Espagne', 'Action', 'EUR'),
+        ('Repsol', 'REP.MC', 'Espagne', 'Action', 'EUR'),
+        ('Ferrovial', 'FER.MC', 'Espagne', 'Action', 'EUR'),
+        ('CaixaBank', 'CABK.MC', 'Espagne', 'Action', 'EUR'),
+        ('Cellnex Telecom', 'CLNX.MC', 'Espagne', 'Action', 'EUR'),
+        ('ACS', 'ACS.MC', 'Espagne', 'Action', 'EUR'),
+        ('Endesa', 'ELE.MC', 'Espagne', 'Action', 'EUR'),
+        ('Enel', 'ENEL.MI', 'Italie', 'Action', 'EUR'),
+        ('Eni', 'ENI.MI', 'Italie', 'Action', 'EUR'),
+        ('Intesa Sanpaolo', 'ISP.MI', 'Italie', 'Action', 'EUR'),
+        ('UniCredit', 'UCG.MI', 'Italie', 'Action', 'EUR'),
     ]
 
     @st.cache_data(ttl=3600, show_spinner=False)
@@ -4040,15 +4324,15 @@ elif mode == "Données réelles":
 
     left, mid, right = st.columns([1, 1, 1])
     with left:
-        zone = st.selectbox("Zone géographique", ["Toutes", "France", "États-Unis"], key="real_v125_zone")
+        zone = st.selectbox("Zone géographique", ["Toutes", "France", "Allemagne", "Pays-Bas", "Espagne", "Italie", "États-Unis"], key="real_v125_zone")
     with mid:
-        category = st.selectbox("Type de sous-jacent", ["Tous", "Actions", "Indices"], key="real_v125_category")
+        category = st.selectbox("Type de sous-jacent", ["Tous", "Actions"], key="real_v125_category")
     with right:
         search = st.text_input("Rechercher (nom ou ticker)", placeholder="Ex. NVIDIA, BNP, CAC 40...", key="real_v125_search")
 
     candidates = [a for a in ASSETS_V125
                   if (zone == "Toutes" or a[2] == zone)
-                  and (category == "Tous" or a[3] == ("Action" if category == "Actions" else "Indice"))
+                  and (category == "Tous" or a[3] == "Action")
                   and (search.strip().casefold() in (a[0] + " " + a[1]).casefold())]
     if not candidates:
         st.warning("Aucun sous-jacent ne correspond aux filtres. Modifie ta recherche.")
